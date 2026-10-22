@@ -40,7 +40,7 @@ iot-mcp = "iot_mcp.cli:main"
 iot-mcp-client = "iot_mcp.client.cli:main"
 
 [project.urls]
-Repository = "https://github.com/stevemurr/IoT-MCP"
+Repository = "https://github.com/SteveWufeng/IoT-MCP"
 
 [tool.hatch.build.targets.wheel]
 packages = ["iot_mcp"]

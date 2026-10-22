@@ -8,15 +8,15 @@ mDNS service-type naming dispute
 The service type default is ``_mcp._tcp``, which is the de-facto community convention used by
 several MCP projects for LAN discovery. It is **not** a registered convention: at least one
 specification in the field (stevemurr/local-mcp-kit's ``local-discovery-v1``) states that
-``_mcp._tcp`` MUST NOT be used, because IANA has already assigned the "mcp" port name to a
-different protocol (IBM's Program Variable/Message Control Protocol), so an mDNS lookup on that
-name can be ambiguous.
+``_mcp._tcp`` MUST NOT be used, because IANA has already assigned the ``mcp`` service name — to
+Matrix Configuration Protocol, port 4458/tcp+udp, registered 2006-12. A DNS-SD lookup on that
+label is therefore ambiguous about which "mcp" is being advertised.
 
 This package deliberately does not litigate the dispute. The type is a configuration value
 (``--mdns-type`` / ``IOT_MCP_MDNS_TYPE``) defaulting to ``_mcp._tcp`` because that is what other
 implementations browse for today; deployers who need to satisfy the stricter reading point both
-the advertiser and the browsers at a different label (for example ``_iotmcp._tcp``). See the
-README's "Discovery naming" section.
+the advertiser and the browsers at a different label (that spec uses ``_appmcp._tcp``;
+``_iotmcp._tcp`` is another option). See the README's "Discovery naming" section.
 """
 
 from __future__ import annotations

@@ -126,16 +126,21 @@ bite you, so they are stated up front:
 
 The default service type is `_mcp._tcp`, which is what other MCP implementations browse for
 today. It is **not** a registered convention. At least one specification in this space
-(`local-mcp-kit`'s `local-discovery-v1`) states that `_mcp._tcp` MUST NOT be used, because
-IANA has already assigned the `mcp` port name to a different protocol (IBM's Program
-Variable/Message Control Protocol), making an mDNS lookup on that label ambiguous.
+(`local-mcp-kit`'s `local-discovery-v1`) states that `_mcp._tcp` MUST NOT be used, because IANA
+has already assigned the `mcp` service name — to **Matrix Configuration Protocol**, port
+4458/tcp+udp, registered 2006-12 ([the registry](https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml?search=mcp)).
+A DNS-SD lookup on `_mcp._tcp` is ambiguous about which `mcp` is on the other end.
+
+That spec is a local-only, encrypted, pairing-based profile rather than a LAN standard, so its
+"MUST NOT" is not binding on this project — but the ambiguity it points at is real, which is
+why the label is configuration and not a constant.
 
 This package takes neither side. The type is a configuration value — `--mdns-type`,
 `IOT_MCP_MDNS_TYPE`, `DEFAULT_MDNS_TYPE` in `iot_mcp/config.py`, defined once and referenced
 everywhere else. Deployers who must satisfy the stricter reading point the advertiser *and*
-the browsers at something unambiguous, e.g. `_iotmcp._tcp`. A client that browses the default
-will not see such a server, which is the correct outcome: discovery is a convention both ends
-have to share.
+the browsers at something unambiguous (that spec uses `_appmcp._tcp`). A client that browses the
+default will not see such a server, which is the correct outcome: discovery is a convention both
+ends have to share.
 
 ## Security
 

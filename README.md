@@ -113,7 +113,7 @@ stack trace:
 ## Discovery
 
 The server registers its service with TXT records (`path=/mcp`, `transport=streamable-http`,
-`name`, `version`) so a client can build the full URL without being told it. Three things will
+`name`, `version`) so a client can build the full URL without being told it. Four things will
 bite you, so they are stated up front:
 
 - **mDNS is multicast.** It does not cross most routers, VLANs, VPN clients, Docker bridges
@@ -121,8 +121,18 @@ bite you, so they are stated up front:
 - **`zeroconf` is optional.** If it cannot be imported, or Avahi is masked, the server says so
   and serves anyway; `--no-mdns` skips the attempt. Nothing else about the server depends on
   discovery.
-- **Both address families are published**, and the client prefers IPv4 when resolving — the
-  family a LAN client is most likely to have a route for.
+- **The published addresses follow the bind.** An `--expose` server publishes its non-loopback
+  IPv4 addresses; a server bound to loopback publishes only the loopback address, so whatever a
+  browser resolves is something that will actually accept the connection. LAN IPv6 addresses are
+  not published. When an answer carries more than one address the client dials the most routable
+  one — non-loopback before loopback, IPv4 before IPv6, the family a LAN client is most likely to
+  have a route for.
+- **Prefer one server per machine.** Every instance advertises under the same mDNS hostname
+  (`Cachy-Y7.local` here), so a loopback-bound instance and an `--expose` one started at the same
+  time publish different address records under one name, and a browser's cache merges them. The
+  routable-first ordering keeps the merged answer safe — the client dials the LAN address, never
+  its own loopback — but it then points *both* instances at that address, so while both are up,
+  reach the loopback one with `--url`. Seen on the demo host.
 
 ### Discovery naming
 
@@ -236,13 +246,16 @@ traffic. Do not flush a ruleset to "see if it helps".
 - **Loopback needs no firewall change at all.** UFW permits loopback, so `127.0.0.1` works
   today, on this machine, with nothing opened. Use that for the rehearsal (below) and open
   8000/tcp only for the actual cross-machine moment.
-- **Loopback + discovery is a trap of its own, and it is not a firewall problem.** mDNS publishes
-  the machine's LAN address (`192.168.0.54` here), never `127.0.0.1` — advertising loopback would
-  be useless to a remote client. So a server bound to loopback advertises a URL that nothing can
-  connect to, and a discovery-driven client gets a crisp `Connection refused`: the advertised
-  address is correct, the bind simply is not listening there. On a loopback bind, pass
-  `--url http://127.0.0.1:<port>/mcp` or start with `--no-mdns`; use discovery once the server is
-  genuinely `--expose`.
+- **Loopback and discovery now agree.** A server bound to loopback advertises the loopback
+  address — `127.0.0.1`, or `::1` if that is what it bound — and nothing else. It used to advertise
+  its LAN address (`192.168.0.54` here), which the bind was not listening on, so the only client
+  that could have used the answer got a crisp `Connection refused`. The published address is now
+  the address that accepts: `pixi run server` plus `pixi run client`, both with **no flags on one
+  machine**, works. One hazard survives and you should know about it: mDNS registration is
+  independent of the TCP bind, so a *remote* browser sees a loopback advertisement too, and
+  dialling `127.0.0.1` from A connects A to itself. For the cross-machine demo the server must run
+  `--expose` — that is not a preference. Separating the two clients requires knowing which machine
+  published the record, which this MVP does not do.
 
 ### Smoke test without any network
 
@@ -257,10 +270,11 @@ examples/smoke-test.sh http://127.0.0.1:8123/mcp
 ```
 
 That exercises the whole server — transport, session handling, tool listing, one real tool call
-— with no firewall, no multicast, no routing and no exposure. Note it passes the URL explicitly
-and starts with `--no-mdns`: on a loopback bind discovery would hand you the LAN address, which
-is not listening (previous section). If it passes there, the server is not what is wrong when the
-Wi-Fi demo fails; work down the checklist above instead.
+— with no firewall, no multicast, no routing and no exposure. `--no-mdns` is there to keep even
+the multicast packets out of the rehearsal, not because discovery would lie to you: on a loopback
+bind it now advertises loopback, and `pixi run discover` on the same machine resolves it. If the
+smoke test passes, the server is not what is wrong when the Wi-Fi demo fails; work down the
+checklist above instead.
 
 ## Security
 
@@ -282,6 +296,9 @@ these deliberate constraints:
   not much use. The exception is a short refusal list where the damage is disproportionate to
   the request: the macOS backend will not quit `loginwindow`, `WindowServer`, `Dock` or
   `Finder`, because closing those is a logged-out user, not an automated task.
+- Not hardened against a *local* attacker: a FIFO named `*.desktop` planted in a scanned XDG
+  applications directory can wedge app discovery (pinned as a known limitation, fix is post-demo
+  work). It needs write access to this machine's own filesystem, so it is not a LAN-facing risk.
 
 For anything beyond a trusted LAN: leave it on loopback and tunnel
 (`ssh -L 8000:127.0.0.1:8000 user@host`), or put an authenticating reverse proxy in front.

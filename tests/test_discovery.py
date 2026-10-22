@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+from typing import Any
 
 import pytest
 
@@ -19,6 +20,8 @@ from iot_mcp.discovery import (
     DiscoveryError,
     _decode_txt,
     _packed_addresses,
+    advertise,
+    advertise_addresses,
     browse,
     endpoint_from_info,
     normalize_service_type,
@@ -179,6 +182,30 @@ def test_a_service_with_no_addresses_yields_no_addresses() -> None:
     assert _packed_addresses(FakeServiceInfo(addresses=[])) == ()
 
 
+def test_a_merged_answer_prefers_the_routable_address_over_loopback() -> None:
+    """Two instances on one host share an mDNS hostname, so their A records merge in the cache.
+
+    Observed for real: with a loopback-bound server and an `--expose` one both up, browsing the
+    exposed instance returned both records. Dialling the loopback one from another machine
+    connects that machine to itself, so a routable address must sort first.
+    """
+    info = FakeServiceInfo(
+        addresses=[
+            ipaddress.IPv4Address("127.0.0.1").packed,
+            ipaddress.IPv4Address("192.168.0.54").packed,
+        ]
+    )
+    assert _packed_addresses(info) == ("192.168.0.54", "127.0.0.1")
+    assert endpoint_from_info("_mcp._tcp.local.", info).host == "192.168.0.54"
+
+
+def test_a_loopback_only_answer_still_resolves_to_loopback() -> None:
+    """The other half: when loopback is all there is, it is the right answer for a local client."""
+    info = FakeServiceInfo(addresses=[ipaddress.IPv4Address("127.0.0.1").packed])
+    assert _packed_addresses(info) == ("127.0.0.1",)
+    assert endpoint_from_info("_mcp._tcp.local.", info).url == "http://127.0.0.1:8000/mcp"
+
+
 # --- endpoint shape ------------------------------------------------------------
 
 
@@ -328,3 +355,111 @@ def test_try_advertise_survives_an_unexpected_error(monkeypatch) -> None:
     monkeypatch.setattr(discovery, "Zeroconf", Weird)
     handle, message = try_advertise(ServerConfig())
     assert handle is None and "RuntimeError" in message and "127.0.0.1" in message
+
+
+# --- which addresses get published ----------------------------------------------
+#
+# A loopback-bound server used to publish its LAN address. The address was real and the bind
+# was not listening on it, so the only client that could act on the answer — the one on the
+# same machine — got `Connection refused`. These tests pin the published address to the bind.
+
+
+@pytest.fixture
+def fake_registration(monkeypatch):
+    """Stands in for zeroconf's registration half so ``advertise()`` opens no socket.
+
+    Returns:
+        A dict with ``infos`` (what was handed to ``ServiceInfo``) and ``responders``.
+    """
+    captured: dict[str, list[Any]] = {"infos": [], "responders": []}
+
+    class RegInfo:
+        def __init__(self, type_: str, name: str, **kwargs: Any) -> None:
+            self.type = type_
+            self.name = name
+            properties = kwargs.get("properties") or {}
+            # zeroconf encodes TXT to bytes on the wire; mirror that so the client-side
+            # assertions below exercise the same shapes browse() really sees.
+            kwargs["properties"] = {
+                (k.encode() if isinstance(k, str) else k): (v.encode() if isinstance(v, str) else v)
+                for k, v in properties.items()
+            }
+            self.__dict__.update(kwargs)
+
+    class Responder:
+        def __init__(self, *args, **kwargs) -> None:
+            self.closed = False
+            self.registered: list[RegInfo] = []
+            captured["responders"].append(self)
+
+        def register_service(self, info: RegInfo, **kwargs) -> None:
+            self.registered.append(info)
+            captured["infos"].append(info)
+
+        def unregister_service(self, info: RegInfo) -> None:
+            self.registered.remove(info)
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(discovery, "ServiceInfo", RegInfo)
+    monkeypatch.setattr(discovery, "Zeroconf", Responder)
+    return captured
+
+
+def test_a_loopback_bind_publishes_loopback_not_the_lan(monkeypatch) -> None:
+    monkeypatch.setattr(discovery, "local_ipv4_addresses", lambda: ["192.168.0.54"])
+    assert advertise_addresses(ServerConfig(host="127.0.0.1")) == ["127.0.0.1"]
+
+
+def test_an_exposed_bind_still_publishes_the_lan_addresses(monkeypatch) -> None:
+    monkeypatch.setattr(discovery, "local_ipv4_addresses", lambda: ["192.168.0.54", "10.0.0.5"])
+    assert advertise_addresses(ServerConfig(host="0.0.0.0")) == ["192.168.0.54", "10.0.0.5"]
+
+
+def test_the_published_family_follows_the_bind(monkeypatch) -> None:
+    monkeypatch.setattr(discovery, "local_ipv4_addresses", lambda: ["192.168.0.54"])
+    # Uvicorn bound to ::1 does not accept 127.0.0.1 (verified on real hardware), so publishing
+    # the v4 loopback there would be the same bug in different notation.
+    assert advertise_addresses(ServerConfig(host="::1")) == ["::1"]
+    # A `localhost` bind listens on both families; v4 is the one clients prefer.
+    assert advertise_addresses(ServerConfig(host="localhost")) == ["127.0.0.1"]
+
+
+def test_advertise_registers_the_address_the_loopback_bind_accepts(fake_registration) -> None:
+    config = ServerConfig(host="127.0.0.1", port=8123)
+    with advertise(config) as advertisement:
+        assert advertisement.addresses == ("127.0.0.1",)
+        assert advertisement.urls == ("http://127.0.0.1:8123/mcp",)
+        info = fake_registration["infos"][0]
+        assert [ipaddress.ip_address(item) for item in info.addresses] == [
+            ipaddress.IPv4Address("127.0.0.1")
+        ]
+        assert info.port == 8123
+    assert fake_registration["responders"][0].closed is True
+
+
+def test_an_ipv6_loopback_advertisement_survives_packing(fake_registration) -> None:
+    """``inet_aton`` cannot pack ``::1``, and the old filter dropped it — publishing nothing."""
+    with advertise(ServerConfig(host="::1", port=8123)) as advertisement:
+        (packed,) = fake_registration["infos"][0].addresses
+        assert len(packed) == 16
+        assert ipaddress.ip_address(packed) == ipaddress.IPv6Address("::1")
+        assert advertisement.urls == ("http://[::1]:8123/mcp",)
+
+
+def test_an_exposed_advertisement_publishes_every_lan_address(
+    fake_registration, monkeypatch
+) -> None:
+    monkeypatch.setattr(discovery, "local_ipv4_addresses", lambda: ["192.168.0.54", "10.0.0.5"])
+    with advertise(ServerConfig(host="0.0.0.0", port=8000)) as advertisement:
+        assert advertisement.urls == ("http://192.168.0.54:8000/mcp", "http://10.0.0.5:8000/mcp")
+
+
+def test_a_loopback_advertisement_resolves_back_to_a_usable_url(fake_registration) -> None:
+    """The client half: what the responder publishes must resolve to 127.0.0.1."""
+    with advertise(ServerConfig(host="127.0.0.1", port=8000)):
+        info = fake_registration["infos"][0]
+        endpoint = endpoint_from_info(info.type, info)
+        assert endpoint.host == "127.0.0.1"
+        assert endpoint.url == "http://127.0.0.1:8000/mcp"

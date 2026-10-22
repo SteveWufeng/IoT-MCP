@@ -208,6 +208,53 @@ def test_no_mdns_disables_advertising() -> None:
     assert config_from_args(parse("--no-mdns")).advertise is False
 
 
+def test_expose_with_a_loopback_host_keeps_host_validation() -> None:
+    """``--expose --host 127.0.0.1`` asks for exposure and then declines it.
+
+    The relaxation used to follow the raw flag, so this combination dropped ``Host`` validation
+    on a bind that ``warn_if_exposed()`` treats as private: a security downgrade with no warning
+    to match it. Protection now follows the resolved bind, so the relaxation and the warning can
+    only ever describe the same server.
+    """
+    config = config_from_args(parse("--expose", "--host", "127.0.0.1"))
+    assert config.host == "127.0.0.1"
+    assert config.exposed is False
+    assert config.disable_rebinding_protection is False
+    assert _transport_security(config) is None, (
+        "loopback must pass nothing to the SDK, which means 'stay protected'"
+    )
+
+
+def test_a_routable_host_relaxes_host_validation_even_without_expose() -> None:
+    """A routable ``--host`` is exposure whether or not the flag was used — and it says so."""
+    for argv in (["--host", "192.168.0.54"], ["--host", "0.0.0.0"]):
+        config = config_from_args(parse(*argv))
+        assert config.exposed is True, argv
+        assert config.disable_rebinding_protection is True, argv
+        assert _transport_security(config).enable_dns_rebinding_protection is False, argv
+        stream = io.StringIO()
+        assert config.warn_if_exposed(stream) is True, (
+            "relaxing Host validation must never be quieter than the bind that caused it"
+        )
+
+
+def test_host_validation_follows_the_resolved_bind_not_the_expose_flag() -> None:
+    """One rule: protection is off exactly when the bind is exposed and no allowlist was given."""
+    cases = [
+        ([], False),
+        (["--expose"], True),
+        (["--expose", "--host", "127.0.0.1"], False),
+        (["--expose", "--host", "localhost"], False),
+        (["--expose", "--host", "::"], True),
+        (["--host", "localhost"], False),
+        (["--expose", "--allow-host", "B.local:8000"], False),
+    ]
+    for argv, relaxed in cases:
+        config = config_from_args(parse(*argv))
+        assert config.disable_rebinding_protection is relaxed, argv
+        assert config.disable_rebinding_protection == (config.exposed and not config.allowed_hosts)
+
+
 def test_flags_beat_environment(monkeypatch) -> None:
     monkeypatch.setenv("IOT_MCP_PORT", "8137")
     assert config_from_args(parse("--port", "9000")).port == 9000

@@ -145,11 +145,18 @@ def config_from_args(args: argparse.Namespace) -> ServerConfig:
         updates["server_name"] = args.name
     if args.no_mdns:
         updates["advertise"] = False
-    if args.expose and not args.allow_host:
-        updates["disable_rebinding_protection"] = True
     if args.allow_host:
         updates["allowed_hosts"] = tuple(args.allow_host)
-    return replace(config, **updates)
+    config = replace(config, **updates)
+    # DNS-rebinding protection follows the *resolved* bind, not the `--expose` flag. The two can
+    # disagree: `--expose --host 127.0.0.1` asks for exposure and then declines it, and keying
+    # off the flag alone dropped Host validation on a loopback bind — silently, because
+    # warn_if_exposed() only speaks when the resolved bind really is reachable. Deriving it from
+    # `.exposed` means the relaxation and the warning always describe the same server, and a
+    # routable `--host` without `--expose` gets the same treatment as the flag.
+    if config.exposed and not config.allowed_hosts:
+        config = replace(config, disable_rebinding_protection=True)
+    return config
 
 
 def _transport_security(config: ServerConfig) -> Any:

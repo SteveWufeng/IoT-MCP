@@ -1,26 +1,58 @@
 {
   // opencode — connecting to an IoT-MCP server running on another machine ("computer B").
   //
+  // Field names below follow opencode's V2 MCP docs (checked 2026-10-22 against
+  // https://opencode.ai/v2/docs/mcp-servers). V2 nests servers under mcp.servers; it does not
+  // place server names directly under `mcp`.
+  //
   // Where this file goes:
   //   ~/.config/opencode/opencode.jsonc   global, every project
-  //   ./opencode.jsonc                     one project, commit it if the team shares the host
+  //   ./opencode.jsonc                     one project
   //
-  // Replace the URL below with what `iot-mcp-client discover` prints on that machine, or with
-  // its static address if you disabled mDNS. The path is always /mcp.
-  "$schema": "https://opencode.ai/config/schema.json",
+  // Hand-editing is optional. From the project that should use the server:
+  //   opencode mcp add iot --url http://192.168.0.54:8000/mcp
+  //   opencode mcp list          # expect:  ✓ iot  connected
+  //
+  // Replace the URL with what `iot-mcp-client discover` prints on that machine. The path is
+  // always /mcp. If you changed the server's --mdns-type, that has no effect here: this is a
+  // direct URL, discovery is not involved.
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
-      "iot-os": {
-        // "remote" is the HTTP/SSE transport. Do not use "local" here: that spawns a process
-        // on *this* machine, which defeats the purpose of driving a different computer.
+      // Named `iot`, not `iot-os`. opencode names tools `<server>_<tool>` and normalises
+      // anything outside letters, digits, `_` and `-`; the docs advise picking names that stay
+      // clean after normalisation, and a single word removes any doubt about how the hyphen
+      // renders in the Code Mode grouping (`tools.iot.open_app`).
+      "iot": {
+        // "remote" is the Streamable HTTP transport. Do not use "local": that spawns a process
+        // on *this* machine, which defeats the point of driving a different computer.
         "type": "remote",
         "url": "http://192.168.0.54:8000/mcp",
-        "enabled": true,
-        // This MVP has no authentication. Declaring oauth:false stops the client from
-        // starting an authorisation flow against a server that cannot answer one.
-        "oauth": false,
-        // Optional: a shorter name shows up in the model's tool list as mcp_iot-os_*.
-        "timeout": 10000
+        // Remote servers try OAuth unless told otherwise. This MVP has no authentication at all
+        // — no token, no API key — so authorisation discovery has nothing to find and the
+        // server would just sit at "needs authentication". Note this is a slightly different
+        // case from the docs' example, which disables OAuth for a server protected by a header
+        // credential; here there is no credential of any kind.
+        "oauth": false
+        // No `enabled` field: V2 connects configured servers automatically. To keep this entry
+        // in place but disconnected, set `"disabled": true`.
+        //
+        // No `timeout` either, deliberately. V2 timeouts are an object — { startup, catalog,
+        // execution } — and the defaults are 30s connect, 30s tools/list, and 12 hours for tool
+        // calls. Launching a slow GUI app is an *execution* timeout concern, and 12 hours is
+        // already more than this server needs: `open_app` returns as soon as the process is
+        // spawned and never waits for the app. Setting execution to something like 120000 would
+        // make the demo more fragile, not less. Raise `startup` here (e.g. 45000) if B is on a
+        // sleepy Wi-Fi link and the first connect races.
+        //
+        // `codemode` defaults to true, so these eleven tools are reached through Code Mode,
+        // grouped under the normalised server name: tools.iot.open_app(...), tools.iot
+        // .media_status(...) and so on. Set "codemode": false to put them on the provider's
+        // native tool list instead — worth doing if you want the model to see the destructive
+        // flags without Code Mode in between.
+        //
+        // Leave `protocol` alone. The default ("legacy") performs the classic initialize
+        // handshake, which is what the MCP Python SDK server speaks.
       }
     }
   }

@@ -6,6 +6,9 @@ The wire contract this module maintains:
   :data:`iot_mcp.config.DEFAULT_MDNS_TYPE` (see that module for the naming dispute; this file
   never hardcodes a type)
 * instance name — configurable, default ``IoT-MCP``
+* addresses — the LAN addresses when the server is bound to be reachable (``--expose``), and
+  the loopback address when it is not, so what is published is what will accept a connection
+  (see :func:`advertise_addresses`)
 * port — the server's TCP port
 * TXT — ``path=/mcp``, ``transport=streamable-http``, ``name=<instance>``, ``version=<pkg>``
 
@@ -24,6 +27,7 @@ resolution, which is exactly what is missing on machines without Avahi. So
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 import socket
@@ -51,6 +55,7 @@ __all__ = [
     "DiscoveryError",
     "DiscoveredEndpoint",
     "advertise",
+    "advertise_addresses",
     "browse",
     "endpoint_from_info",
     "local_ipv4_addresses",
@@ -139,6 +144,49 @@ def local_ipv4_addresses() -> list[str]:
     except OSError:
         pass
     return found
+
+
+def advertise_addresses(config: ServerConfig) -> list[str]:
+    """Addresses to publish for this bind, chosen so a client can actually connect.
+
+    A loopback-bound server used to publish its LAN address, and a client on the same machine
+    dutifully dialled it and got ``Connection refused`` — the address was real, the bind simply
+    was not listening on it. Publishing the loopback address instead is what makes
+    ``pixi run server`` and ``pixi run client``, both with no flags, work on a single machine.
+
+    The address family follows the bind. Uvicorn bound to ``::1`` does not accept connections to
+    ``127.0.0.1`` (verified), so publishing the v4 loopback there would repeat the same mistake
+    in different notation; a ``localhost`` bind listens on both families, and the v4 loopback is
+    the one clients prefer.
+
+    The residual hazard is real and deliberately left open: mDNS registration is independent of
+    the TCP bind, so a *remote* browser sees a loopback advertisement as well, and dialling
+    ``127.0.0.1`` from there leads to the wrong machine. Distinguishing the two clients needs
+    server identity, which is the mDNS trust-boundary work rather than this fix. Suppressing
+    advertisement entirely was the alternative, and it was rejected: it breaks the one case the
+    advertisement can serve correctly (a client that is, in fact, local).
+
+    Args:
+        config: Resolved server configuration.
+
+    Returns:
+        Addresses to publish, best first. Empty only when there is no LAN address to publish.
+    """
+    if config.exposed:
+        return local_ipv4_addresses()
+    return ["::1" if config.host == "::1" else "127.0.0.1"]
+
+
+def _pack_ip(text: str) -> bytes:
+    """Pack an IPv4 or IPv6 address into the bytes a ``ServiceInfo`` record wants.
+
+    ``inet_pton`` with ``AF_INET6`` refuses dotted-quad and vice versa, so trying the two in
+    order is a complete and unambiguous test.
+    """
+    try:
+        return socket.inet_pton(socket.AF_INET6, text)
+    except OSError:
+        return socket.inet_aton(text)
 
 
 def service_hostname() -> str:
@@ -262,9 +310,22 @@ def _packed_addresses(info: Any) -> tuple[str, ...]:
         for text in getattr(info, "parsed_addresses", []) or []:
             if text and text not in readable:
                 readable.append(str(text))
-    # IPv4 sorts first on purpose: DiscoveredEndpoint.host takes [0], and on a dual-stack LAN
-    # a link-local-looking v6 is far more likely to be unroutable than the advertised v4.
-    readable.sort(key=lambda text: (":" in text, text))
+
+    # Ordering is the client's only defence against a merged answer, and it is load-bearing.
+    # Two instances on one host share a single mDNS hostname, so a browser can hold both the
+    # loopback A record published by a loopback-bound server and the LAN record published by an
+    # --expose one for the same name. A routable address is the right dial in that case for every
+    # client — a client on the server's own machine can still reach it — whereas dialling the
+    # loopback record from another machine connects that machine to itself. IPv4 before IPv6 for
+    # the standing reason: an advertised v6 is likelier to have no route than the advertised v4.
+    def rank(text: str) -> tuple[int, int, str]:
+        try:
+            ip = ipaddress.ip_address(text)
+        except ValueError:
+            return (2, 2, text)
+        return (int(ip.is_loopback), int(ip.version == 6), text)
+
+    readable.sort(key=rank)
     return tuple(readable)
 
 
@@ -454,10 +515,11 @@ def advertise(config: ServerConfig) -> Advertisement:
             f"instance name {instance!r} is empty, too long (>{_MAX_LABEL} chars) or contains "
             "newlines"
         )
-    addresses = local_ipv4_addresses()
+    addresses = advertise_addresses(config)
     if not addresses:
         raise DiscoveryError(
-            "no usable non-loopback IPv4 address found, so there is nothing to advertise"
+            "no usable non-loopback IPv4 address found, so there is nothing to advertise. "
+            "Start the server with --expose to be discoverable, or bind a routable --host."
         )
     zc: Any = None
     try:
@@ -465,7 +527,7 @@ def advertise(config: ServerConfig) -> Advertisement:
         info = ServiceInfo(
             qualified,
             f"{instance}.{qualified}",
-            addresses=[socket.inet_aton(item) for item in addresses if ":" not in item],
+            addresses=[_pack_ip(item) for item in addresses],
             port=config.port,
             properties=config.txt_records(),
             server=service_hostname(),

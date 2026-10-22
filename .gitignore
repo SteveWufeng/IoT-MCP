@@ -2,6 +2,9 @@
 .pixi/*
 !.pixi/config.toml
 
+# SQA run artifacts — point-in-time reports, not project source
+tests/reports/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,0 +1,84 @@
+# Packaging metadata for the `iot_mcp` package.
+#
+# Development in this repo goes through pixi (see pixi.toml); this file exists so the package can
+# also be installed normally (`pip install .`, `uv tool install`, or `pipx install .`) on machines
+# that want the `iot-mcp` console scripts rather than a workspace.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "iot-mcp"
+version = "0.1.0"
+description = "OS automation (apps, media, URLs, windows) exposed as MCP tools over Streamable HTTP with mDNS discovery"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Yiyuan (Steve) Wufeng", email = "yfeng219@gmail.com" }]
+keywords = ["mcp", "model-context-protocol", "automation", "linux", "wayland", "mdns"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Desktop Environment",
+]
+# Runtime deps mirror pixi.toml. `mcp` is pinned to the 2.x line because this package is written
+# against `mcp.server.mcpserver.MCPServer` (2.x renamed `FastMCP`); 1.x would need a different
+# import path. `zeroconf` is optional in practice: discovery degrades to "connect by URL" when the
+# import fails.
+dependencies = [
+    "mcp[cli]>=2.3,<3",
+    "zeroconf>=0.131",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+iot-mcp = "iot_mcp.cli:main"
+iot-mcp-client = "iot_mcp.client.cli:main"
+
+[project.urls]
+Repository = "https://github.com/stevemurr/IoT-MCP"
+
+[tool.hatch.build.targets.wheel]
+packages = ["iot_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The repo is used in-place (pixi does not install the package), so make sure `import iot_mcp`
+# works no matter which directory pytest is invoked from.
+pythonpath = ["."]
+# Test functions are `async def`; selecting auto mode avoids a decorator on every one.
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = [
+    # The suite fences every driver module so no test can touch the machine it runs on.
+    # Only the launch/terminate round-trip test may opt out, and it says so explicitly.
+    "allow_real_processes: this test may launch and kill a real process",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = [
+    # Line length is the formatter's job; long prose in docstrings is intentional.
+    "E501",
+    # Async functions in this codebase take an explicit `timeout` *parameter* as part of the public
+    # driver/client API (a per-call budget, not a deadline for the surrounding task). The rule only
+    # complains about the parameter name, so it is suppressed project-wide.
+    "ASYNC109",
+    # `contextlib.suppress` versus `except: pass` is pure style, and "this capability probe failed,
+    # carry on" is most of this codebase.
+    "SIM105",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The test suite fences every driver module with an autouse tripwire and does not run async code
+# against a live server loop, so the async-process rules are not meaningful there. `pytest.raises(
+# Exception)` is deliberate in the MCP surface tests, which assert that no error escapes the server.
+"tests/*" = ["ASYNC220", "ASYNC221", "ASYNC222", "B017"]

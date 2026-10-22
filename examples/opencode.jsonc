@@ -1,0 +1,27 @@
+{
+  // opencode — connecting to an IoT-MCP server running on another machine ("computer B").
+  //
+  // Where this file goes:
+  //   ~/.config/opencode/opencode.jsonc   global, every project
+  //   ./opencode.jsonc                     one project, commit it if the team shares the host
+  //
+  // Replace the URL below with what `iot-mcp-client discover` prints on that machine, or with
+  // its static address if you disabled mDNS. The path is always /mcp.
+  "$schema": "https://opencode.ai/config/schema.json",
+  "mcp": {
+    "servers": {
+      "iot-os": {
+        // "remote" is the HTTP/SSE transport. Do not use "local" here: that spawns a process
+        // on *this* machine, which defeats the purpose of driving a different computer.
+        "type": "remote",
+        "url": "http://192.168.0.54:8000/mcp",
+        "enabled": true,
+        // This MVP has no authentication. Declaring oauth:false stops the client from
+        // starting an authorisation flow against a server that cannot answer one.
+        "oauth": false,
+        // Optional: a shorter name shows up in the model's tool list as mcp_iot-os_*.
+        "timeout": 10000
+      }
+    }
+  }
+}

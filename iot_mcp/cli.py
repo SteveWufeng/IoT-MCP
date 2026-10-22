@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"mDNS service type (default: {DEFAULT_MDNS_TYPE}). A client browsing any other "
         "label will not see this server, and will not be told why. Pass '_mcp._tcp' for the "
-        "community label; see the README's 'Discovery naming' section.",
+        "community label; see 'Discovery naming' in docs/discovery.md.",
     )
     parser.add_argument(
         "--mdns-instance",

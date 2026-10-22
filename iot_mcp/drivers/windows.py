@@ -1,7 +1,7 @@
 """Windows automation backend: PowerShell + Win32 P/Invoke.
 
-**Not executed on the Linux host this package was developed on** — see the README's "what is
-actually verified" section. Read it as an audit target.
+**Not executed on the Linux host this package was developed on** — see "What is actually
+verified" in ``docs/internals.md``. Read it as an audit target.
 
 Injection model (the important part): PowerShell has no argument escaping that is safe to
 hand-roll, so user input is **never interpolated into a script**. Scripts are static text sent

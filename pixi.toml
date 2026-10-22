@@ -4,7 +4,8 @@ channels = ["conda-forge"]
 name = "IoT-MCP"
 # Only linux-64 is locked: that is the platform this was developed and verified on. Adding
 # osx-arm64/win-64 was attempted and the lock was dropped rather than left unverified — see the
-# README ("Platforms"). The *code* supports all three; only the lockfile is Linux-only.
+# docs ("Platforms" in docs/internals.md). The *code* supports all three; only the lockfile is
+# Linux-only.
 platforms = ["linux-64"]
 version = "0.1.0"
 

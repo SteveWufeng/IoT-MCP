@@ -1,7 +1,7 @@
 """macOS automation backend: ``open``, AppleScript, and System Events.
 
-**Not executed on the Linux host this package was developed on** — see the README's
-"what is actually verified" section. It is written to be read and audited: every AppleScript
+**Not executed on the Linux host this package was developed on** — see "What is actually
+verified" in ``docs/internals.md``. It is written to be read and audited: every AppleScript
 fragment is built through :func:`escape_applescript`, and launching goes through ``open``
 with an argument vector, so no user input ever reaches a shell.
 

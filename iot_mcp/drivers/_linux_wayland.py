@@ -242,7 +242,7 @@ def parse_wmctrl_line(line: str) -> Window | None:
     contain spaces and ``wmctrl`` offers no quoting, so the last whitespace-separated token
     is taken as ``WM_CLASS`` and everything before it as the title. That is the same
     heuristic every other wmctrl wrapper uses, and it is why ``-x`` output is lossy for
-    titles ending in a single word — noted in the README as an X11-path limitation.
+    titles ending in a single word — noted in ``docs/internals.md`` as an X11-path limitation.
 
     Args:
         line: One output line.

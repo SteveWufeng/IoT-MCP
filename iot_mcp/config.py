@@ -22,8 +22,8 @@ agree on the label; that is the whole of discovery.
 operator whose client only browses the community label can advertise it with ``--mdns-type
 _mcp._tcp``. The type is a configuration value (``--mdns-type`` / ``IOT_MCP_MDNS_TYPE``),
 defined once here; anyone satisfying the stricter reading keeps both ends on ``_appmcp._tcp``,
-which is what the local-mcp-kit ``local-discovery-v1`` profile uses. See the README's "Discovery
-naming" and "Network & firewall prerequisites" sections.
+which is what the local-mcp-kit ``local-discovery-v1`` profile uses. See "Discovery naming" in
+``docs/discovery.md`` and "Network & firewall prerequisites" in ``docs/troubleshooting.md``.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """LAN discovery: type naming, resolution, and graceful degradation.
 
 The fake ``Zeroconf`` here means no test sends an mDNS packet; end-to-end behaviour on real
-hardware was verified separately (see the README's verified/unverified table).
+hardware was verified separately (see "What is actually verified" in ``docs/internals.md``).
 """
 
 from __future__ import annotations

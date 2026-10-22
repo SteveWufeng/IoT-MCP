@@ -6,7 +6,7 @@ whoever is sitting at this machine, and ``open_app`` would start a program on th
 
 The server runs with ``--no-mdns``, so this test needs no responder and sends no mDNS traffic;
 discovery itself is covered in :mod:`tests.test_discovery` and was confirmed on real hardware
-(see the README's verified table).
+(see "What is actually verified" in ``docs/internals.md``).
 """
 
 from __future__ import annotations

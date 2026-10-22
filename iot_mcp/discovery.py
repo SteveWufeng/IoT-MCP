@@ -2,7 +2,7 @@
 
 The wire contract this module maintains:
 
-* service type — configurable, default ``_mcp._tcp`` from
+* service type — configurable, default ``_appmcp._tcp`` from
   :data:`iot_mcp.config.DEFAULT_MDNS_TYPE` (see that module for the naming dispute; this file
   never hardcodes a type)
 * instance name — configurable, default ``IoT-MCP``
@@ -72,14 +72,15 @@ class DiscoveryError(RuntimeError):
 def normalize_service_type(service_type: str) -> str:
     """Canonicalise a user-supplied service type into fully-qualified DNS form.
 
-    ``_mcp._tcp``, ``_mcp._tcp.local`` and ``_mcp._tcp.local.`` are all accepted and mean the
-    same thing; callers should not have to know that mDNS lives in ``.local``.
+    ``_appmcp._tcp``, ``_appmcp._tcp.local`` and ``_appmcp._tcp.local.`` are all accepted and
+    mean the same thing; callers should not have to know that mDNS lives in ``.local``. Any
+    other label (``_mcp._tcp`` included) is normalised the same way.
 
     Args:
         service_type: Service type, with or without the ``.local.`` suffix.
 
     Returns:
-        The fully-qualified type, e.g. ``_mcp._tcp.local.``
+        The fully-qualified type, e.g. ``_appmcp._tcp.local.``
 
     Raises:
         DiscoveryError: The value is not a valid ``_service._proto.`` type.

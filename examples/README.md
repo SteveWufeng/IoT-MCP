@@ -7,21 +7,27 @@ Two machines are involved throughout:
 | **computer B** | runs the MCP server, has its desktop automated | `pixi run server` |
 | **computer A** | runs the model, calls the tools | `iot_mcp.client`, the configs below |
 
-Everything here assumes B is reachable from A and that B was started with `--expose`
-(otherwise it binds `127.0.0.1` and A gets connection-refused).
+Everything here assumes B is reachable from A and that B was started with `--expose` (otherwise
+it binds `127.0.0.1` and A cannot connect: instant *connection refused* if the port is actually
+reachable, a **hang** if a firewall drops the packet first — see "Network & firewall
+prerequisites" in the top-level README).
 
 ## Find the URL first
 
-B advertises itself over mDNS; A does not need to be told the address:
+B advertises itself over mDNS as `_appmcp._tcp`; A does not need to be told the address:
 
 ```sh
 pixi run discover                       # or: iot-mcp-client --browse-only
-avahi-browse -rt _mcp._tcp              # same thing, from the system tool
+avahi-browse -rt _appmcp._tcp           # same thing, from the system tool
 ```
 
 which prints something like `http://192.168.0.54:8000/mcp`. Every example below uses that
 URL. If mDNS does not reach your client — Docker bridge, VPN, a VLAN between the machines, a
 guest Wi-Fi network that suppresses multicast — use B's static address instead.
+
+Both ends must name the same service type. A server started with `--mdns-type _mcp._tcp` is
+invisible to a client browsing the default, and neither side reports anything wrong; an empty
+browse result is the only symptom.
 
 ## Smoke test
 
@@ -60,7 +66,7 @@ from iot_mcp.client import connect, call_tool, list_tools, resolve_url
 
 
 async def main() -> None:
-    url = await resolve_url(mdns_type="_mcp._tcp", browse_timeout=2.0)
+    url = await resolve_url(browse_timeout=2.0)  # browses DEFAULT_MDNS_TYPE (_appmcp._tcp)
     async with connect(url) as session:
         print([tool["name"] for tool in await list_tools(session)])
         result = await call_tool(session, "media_status")

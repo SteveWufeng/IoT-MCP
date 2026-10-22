@@ -38,13 +38,31 @@ def test_the_service_type_has_exactly_one_default_definition() -> None:
     import iot_mcp.config as config_module
     import iot_mcp.discovery as discovery_module
 
-    assert DEFAULT_MDNS_TYPE == "_mcp._tcp"
+    # DNS-SD service types come out of the same RFC 6335 registry as service names, and `mcp`
+    # is assigned there (port 4458, Matrix Configuration Protocol, 2006-12). Hence `_appmcp`.
+    assert DEFAULT_MDNS_TYPE == "_appmcp._tcp"
+    # DNS labels are length-limited; `_appmcp` fits, and the check keeps a future rename honest.
+    assert len(DEFAULT_MDNS_TYPE.split(".")[0]) <= 15
     # discovery re-exports the same object rather than repeating the literal
     assert discovery_module.DEFAULT_MDNS_TYPE is config_module.DEFAULT_MDNS_TYPE
-    source = pathlib.Path(discovery_module.__file__).read_text(encoding="utf-8")
-    assert '"_mcp._tcp"' not in source and "'_mcp._tcp'" not in source, (
-        "discovery must import the service type, not hardcode the literal"
-    )
+    # ...and nothing else in the package carries it as a *value*. Docstrings may name the label;
+    # a quoted literal elsewhere would be a second default waiting to drift.
+    package = pathlib.Path(config_module.__file__).parent
+    quoted = tuple(f"{mark}{DEFAULT_MDNS_TYPE}{mark}" for mark in "\"'")
+    offenders = [
+        str(path.relative_to(package))
+        for path in sorted(package.rglob("*.py"))
+        if path.name != "config.py"
+        and any(marker in path.read_text(encoding="utf-8") for marker in quoted)
+    ]
+    assert offenders == [], f"service type hardcoded outside config.py: {offenders}"
+
+
+@pytest.mark.parametrize("label", ["_iotmcp._tcp", "_mcp._tcp", "_AppMCP._TCP.local."])
+def test_the_service_type_is_a_flag_not_a_constant(label: str) -> None:
+    """Any label is selectable, `_mcp._tcp` included: it lost the default, not the support."""
+    config = config_from_args(parse("--mdns-type", label))
+    assert config.mdns_type == label
 
 
 def test_environment_overrides_are_prefixed_and_typed(monkeypatch) -> None:
@@ -188,11 +206,6 @@ def test_allow_host_keeps_validation_on_with_an_explicit_list() -> None:
 
 def test_no_mdns_disables_advertising() -> None:
     assert config_from_args(parse("--no-mdns")).advertise is False
-
-
-def test_the_service_type_is_a_flag_not_a_constant() -> None:
-    config = config_from_args(parse("--mdns-type", "_iotmcp._tcp"))
-    assert config.mdns_type == "_iotmcp._tcp"
 
 
 def test_flags_beat_environment(monkeypatch) -> None:

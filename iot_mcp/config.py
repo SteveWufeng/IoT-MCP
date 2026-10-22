@@ -5,18 +5,25 @@ parser and ``discovery`` never hardcodes a service type of its own.
 
 mDNS service-type naming dispute
 --------------------------------
-The service type default is ``_mcp._tcp``, which is the de-facto community convention used by
-several MCP projects for LAN discovery. It is **not** a registered convention: at least one
-specification in the field (stevemurr/local-mcp-kit's ``local-discovery-v1``) states that
-``_mcp._tcp`` MUST NOT be used, because IANA has already assigned the ``mcp`` service name — to
-Matrix Configuration Protocol, port 4458/tcp+udp, registered 2006-12. A DNS-SD lookup on that
-label is therefore ambiguous about which "mcp" is being advertised.
+The default is ``_appmcp._tcp``. The label matters because DNS-SD service types are drawn from
+the same RFC 6335 registry as TCP/UDP service names, and ``mcp`` is already assigned in it —
+to Matrix Configuration Protocol, port 4458/tcp+udp, registered 2006-12. So ``_mcp._tcp``, the
+label a number of MCP projects use today, is a *borrowed* name: a DNS-SD lookup on it is
+ambiguous about which ``mcp`` is on the other end. ``_appmcp`` is unassigned, and at 7 characters
+its 13-character ``_appmcp._tcp`` form sits comfortably inside the 15-character DNS label limit
+(``_mcp._tcp`` would too; length is not the objection, the collision is).
 
-This package deliberately does not litigate the dispute. The type is a configuration value
-(``--mdns-type`` / ``IOT_MCP_MDNS_TYPE``) defaulting to ``_mcp._tcp`` because that is what other
-implementations browse for today; deployers who need to satisfy the stricter reading point both
-the advertiser and the browsers at a different label (that spec uses ``_appmcp._tcp``;
-``_iotmcp._tcp`` is another option). See the README's "Discovery naming" section.
+The trade-off is a silent one and deployers should understand it: a client that browses
+``_mcp._tcp`` will simply not see a server advertising ``_appmcp._tcp``, and vice versa. Nothing
+errors, nothing logs on the far side — discovery just returns an empty list. Both ends have to
+agree on the label; that is the whole of discovery.
+
+``_mcp._tcp`` remains a perfectly valid explicit value and is normalized identically, so an
+operator whose client only browses the community label can advertise it with ``--mdns-type
+_mcp._tcp``. The type is a configuration value (``--mdns-type`` / ``IOT_MCP_MDNS_TYPE``),
+defined once here; anyone satisfying the stricter reading keeps both ends on ``_appmcp._tcp``,
+which is what the local-mcp-kit ``local-discovery-v1`` profile uses. See the README's "Discovery
+naming" and "Network & firewall prerequisites" sections.
 """
 
 from __future__ import annotations
@@ -48,9 +55,11 @@ DEFAULT_PORT = 8000
 #: Mount point advertised in the ``path=`` TXT record.
 DEFAULT_MCP_PATH = "/mcp"
 
-#: Default mDNS service type — see the module docstring for the naming dispute. Change it
-#: here (or with ``--mdns-type``) rather than adding another literal elsewhere.
-DEFAULT_MDNS_TYPE = "_mcp._tcp"
+#: Default mDNS service type. ``_appmcp`` rather than the community's ``_mcp`` because DNS-SD
+#: service types share the RFC 6335 service-name registry and ``mcp`` is already assigned there.
+#: ``_mcp._tcp`` still works when passed explicitly. Change it here (or with ``--mdns-type``)
+#: and nowhere else.
+DEFAULT_MDNS_TYPE = "_appmcp._tcp"
 
 #: Default human-readable mDNS instance name.
 DEFAULT_MDNS_INSTANCE = "IoT-MCP"

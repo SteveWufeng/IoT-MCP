@@ -270,7 +270,8 @@ async def resolve_url(
 
     Args:
         url: Explicit URL; wins over discovery.
-        mdns_type: Service type to browse (default: the package default, ``_mcp._tcp``).
+        mdns_type: Service type to browse; defaults to
+            :data:`iot_mcp.config.DEFAULT_MDNS_TYPE` (both ends of a connection must agree on it).
         browse_timeout: Seconds to wait for mDNS replies.
         instance: Instance name to prefer when several servers answer.
 

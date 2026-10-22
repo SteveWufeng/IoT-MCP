@@ -23,6 +23,7 @@ from iot_mcp.client.connect import (
     pick_endpoint,
     resolve_url,
 )
+from iot_mcp.config import DEFAULT_MDNS_TYPE
 from iot_mcp.discovery import DiscoveredEndpoint
 
 #: ``iot_mcp.client`` re-exports the ``connect()`` helper, which shadows the submodule of the
@@ -214,7 +215,7 @@ async def test_list_tools_normalises_the_server_catalogue() -> None:
 def endpoint(instance: str, name: str = "", host: str = "192.168.0.5") -> DiscoveredEndpoint:
     return DiscoveredEndpoint(
         instance=instance,
-        service_type="_mcp._tcp.local.",
+        service_type="_appmcp._tcp.local.",
         target=f"{instance}.local",
         addresses=(host,),
         port=8000,
@@ -287,7 +288,8 @@ async def test_the_custom_service_type_is_passed_through_to_browsing(monkeypatch
 
 def test_the_client_defaults_to_discovery_and_the_repl() -> None:
     args = build_parser().parse_args([])
-    assert args.url is None and args.mdns_type == "_mcp._tcp"
+    # pinned to the shared constant *and* the value, so neither side can drift quietly
+    assert args.url is None and args.mdns_type == DEFAULT_MDNS_TYPE == "_appmcp._tcp"
     assert args.browse_only is False and args.call is None
 
 

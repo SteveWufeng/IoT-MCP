@@ -40,7 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--url", default=None, help="Connect to this URL instead of browsing.")
-    parser.add_argument("--mdns-type", default=DEFAULT_MDNS_TYPE, help="Service type to browse.")
+    parser.add_argument(
+        "--mdns-type",
+        default=DEFAULT_MDNS_TYPE,
+        help="Service type to browse. Must match what the server advertises; a mismatch is "
+        "silent. Servers on the old community label need '_mcp._tcp'.",
+    )
     parser.add_argument(
         "--instance", default=None, help="Prefer this instance name when several answer."
     )

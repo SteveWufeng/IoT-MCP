@@ -18,13 +18,17 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from ..auth import AuthConfigError, read_token_file
 from ..config import DEFAULT_MDNS_TYPE
 from ..discovery import DiscoveryError, browse
-from .connect import call_tool, connect, list_tools, resolve_url
+from .connect import CallResult, call_tool, connect, list_tools, resolve_url
 from .connect import describe_exception as _describe_exception
 
 __all__ = ["build_parser", "main"]
@@ -80,6 +84,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--call-timeout", type=float, default=30.0, help="Seconds to wait for one tool call."
     )
+    parser.add_argument(
+        "--save-images",
+        default=None,
+        metavar="DIR",
+        help="Where to write image content blocks a tool returns (screenshots and the like). "
+        "Defaults to a temp dir; the path of each saved image is printed after the result.",
+    )
+    parser.add_argument(
+        "--open-images",
+        action="store_true",
+        help="Ask the desktop viewer to open each saved image. Needs a graphical session.",
+    )
     parser.add_argument("--json", action="store_true", help="Print raw JSON instead of prose.")
     parser.add_argument("--quiet", action="store_true", help="Skip the banner and tool listing.")
     parser.add_argument("--log-level", default="warning", choices=["debug", "info", "warning"])
@@ -92,6 +108,48 @@ def _dump(payload: Any, *, pretty: bool = True) -> str:
         return json.dumps(payload, indent=2 if pretty else None, default=str)
     except (TypeError, ValueError):  # pragma: no cover - defensive
         return str(payload)
+
+
+def _image_dir(args: argparse.Namespace) -> Path:
+    """Directory for image content blocks, from ``--save-images`` or the temp dir.
+
+    A terminal cannot draw a picture and a text-only model cannot read one, so the useful thing
+    to do with a screenshot is write it somewhere and say where.
+    """
+    requested = getattr(args, "save_images", None)
+    if requested:
+        return Path(str(requested)).expanduser()
+    return Path(tempfile.gettempdir()) / "iot-mcp-images"
+
+
+def _open_image(path: str) -> None:
+    """Hand a saved image to the desktop viewer, without ever blocking or raising."""
+    for launcher in ("xdg-open", "open"):
+        binary = shutil.which(launcher)
+        if binary is None:
+            continue
+        try:
+            subprocess.Popen([binary, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            continue
+        return
+    print("cannot open the image: no xdg-open/open on PATH", file=sys.stderr)
+
+
+def _report_images(result: CallResult, *, open_images: bool = False, stream: Any = None) -> None:
+    """Print where each image went, and the reason if any image block was dropped.
+
+    ``--json`` callers parse stdout, so under that flag the paths are reported on stderr instead
+    of being smuggled into the document.
+    """
+    out = stream if stream is not None else sys.stdout
+    for path in result.images:
+        print(f"image saved: {path}", file=out)
+        if open_images:
+            _open_image(path)
+    note = (result.raw or {}).get("image_note")
+    if note:
+        print(f"note: {note}", file=out)
 
 
 def _resolve_token(args: argparse.Namespace) -> str | None:
@@ -148,12 +206,20 @@ def _print_endpoints(endpoints: list[Any], token: str | None = None) -> None:
         )
 
 
-async def _repl(session: Any, tools: list[dict[str, Any]]) -> None:
+async def _repl(
+    session: Any,
+    tools: list[dict[str, Any]],
+    *,
+    image_dir: Path | None = None,
+    open_images: bool = False,
+) -> None:
     """Interactive prompt: ``<tool> [json-args]``, ``tools``, ``actions``, ``help``, ``quit``.
 
     Args:
         session: An initialized client session.
         tools: Tool descriptors fetched at connect time, used for name matching.
+        image_dir: Where screenshots go, from :func:`_image_dir`.
+        open_images: Whether to hand each saved image to the desktop viewer.
     """
     names = [str(tool["name"]) for tool in tools]
     print("\ntype a tool name (optionally with a JSON object), or: tools, actions, help, quit")
@@ -195,8 +261,9 @@ async def _repl(session: Any, tools: list[dict[str, Any]]) -> None:
         except ValueError as exc:
             print(f"bad arguments: {exc}")
             continue
-        result = await call_tool(session, name, arguments)
+        result = await call_tool(session, name, arguments, image_dir=image_dir)
         print(_dump(result.payload))
+        _report_images(result, open_images=open_images)
 
 
 async def _amain(args: argparse.Namespace) -> int:
@@ -227,7 +294,8 @@ async def _amain(args: argparse.Namespace) -> int:
     if args.call and not isinstance(arguments, dict):
         print("--args must be a JSON object", file=sys.stderr)
         return 2
-
+    image_dir = _image_dir(args)
+    image_stream = sys.stderr if args.json else sys.stdout
     try:
         url = await resolve_url(
             url=args.url,
@@ -245,8 +313,15 @@ async def _amain(args: argparse.Namespace) -> int:
     try:
         async with connect(url, token=token) as session:
             if args.call:
-                result = await call_tool(session, args.call, arguments, timeout=args.call_timeout)
+                result = await call_tool(
+                    session,
+                    args.call,
+                    arguments,
+                    timeout=args.call_timeout,
+                    image_dir=image_dir,
+                )
                 print(_dump(result.payload, pretty=not args.json))
+                _report_images(result, open_images=args.open_images, stream=image_stream)
                 return 0 if result.ok else 1
             tools = await list_tools(session)
             if not args.quiet:
@@ -254,7 +329,7 @@ async def _amain(args: argparse.Namespace) -> int:
                 for tool in tools:
                     summary = tool["description"].splitlines()[0] if tool["description"] else ""
                     print(f"  {tool['name']:18} {summary[:72]}")
-            await _repl(session, tools)
+            await _repl(session, tools, image_dir=image_dir, open_images=args.open_images)
             return 0
     except Exception as exc:  # noqa: BLE001 - a dead server is a normal client condition
         detail = _describe_exception(exc)

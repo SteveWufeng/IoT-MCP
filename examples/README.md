@@ -105,12 +105,18 @@ fails, so a REPL or an agent loop survives a bad call; connection failures do ra
 arrives as a connection failure and means the server received the request but rejected the
 credential.
 
+A result can also carry `image` content blocks — `browser_take_screenshot` does. Pass
+`call_tool(session, "browser_take_screenshot", image_dir="shots")` and they are written there,
+with the file paths on `result.images`; without it the blocks are counted in `result.raw` and
+dropped, which is the honest version of "a terminal cannot show you this".
+
 ## Optional browser tier
 
 These examples work with the eleven core OS tools. If an operator has approved and installed
 the `browser` add-on, started the server with `--browser`, and started the bridge,
 `tools/list` additionally contains `browser_status`, `browser_start`, `browser_stop`,
-`browser_install_status`, and `browser_request_install`. Upstream page tools such as
+`browser_install_status`, `browser_request_install`, `browser_annotate` and
+`browser_annotate_clear`. Upstream page tools such as
 `browser_navigate` appear only while that bridge is running. Installing it is a human action:
 
 ```sh

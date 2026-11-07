@@ -54,6 +54,8 @@ class BrowserCapability(StrEnum):
     STOP = "browser.stop"
     INSTALL_STATUS = "browser.install_status"
     REQUEST_INSTALL = "browser.request_install"
+    ANNOTATE = "browser.annotate"
+    ANNOTATE_CLEAR = "browser.annotate_clear"
     CALL = "browser.call"
 
 
@@ -81,6 +83,8 @@ BROWSER_CAPABILITIES: tuple[BrowserCapability, ...] = (
     BrowserCapability.STOP,
     BrowserCapability.INSTALL_STATUS,
     BrowserCapability.REQUEST_INSTALL,
+    BrowserCapability.ANNOTATE,
+    BrowserCapability.ANNOTATE_CLEAR,
 )
 
 #: Which MCP tool exercises a capability. Emitted in the matrix so an agent reading
@@ -103,4 +107,6 @@ TOOL_FOR_CAPABILITY: dict[Capability | BrowserCapability, str] = {
     BrowserCapability.STOP: "browser_stop",
     BrowserCapability.INSTALL_STATUS: "browser_install_status",
     BrowserCapability.REQUEST_INSTALL: "browser_request_install",
+    BrowserCapability.ANNOTATE: "browser_annotate",
+    BrowserCapability.ANNOTATE_CLEAR: "browser_annotate_clear",
 }

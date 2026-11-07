@@ -53,15 +53,17 @@ TOOLS = (
     "focus_window",
 )
 
-#: The five tools the browser tier contributes when ``--browser`` is on. They are lifecycle
-#: controls, not page actions: the page tools come from the upstream add-on at runtime and are
-#: deliberately absent from any fixed list here.
+#: The tools the browser tier contributes when ``--browser`` is on. They are lifecycle,
+#: approval and narration controls, not page actions: the page tools come from the upstream
+#: add-on at runtime and are deliberately absent from any fixed list here.
 BROWSER_CONTROL_TOOLS = (
     "browser_status",
     "browser_start",
     "browser_stop",
     "browser_install_status",
     "browser_request_install",
+    "browser_annotate",
+    "browser_annotate_clear",
 )
 
 
@@ -95,6 +97,8 @@ def test_browser_capabilities_are_a_separate_vocabulary_from_the_driver_matrix()
         "browser.stop",
         "browser.install_status",
         "browser.request_install",
+        "browser.annotate",
+        "browser.annotate_clear",
     ]
     assert "browser.request_install" not in {cap.value for cap in ALL_CAPABILITIES}
     assert set(BROWSER_CONTROL_TOOLS).isdisjoint(TOOLS)

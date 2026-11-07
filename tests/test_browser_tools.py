@@ -306,3 +306,214 @@ class _FakeTool:
         self.description = f"Upstream description for {upstream_name}."
         self.input_schema = schema or {"type": "object", "properties": {}}
         self.annotations = None
+
+
+# --- narration on the screen (browser_annotate) ------------------------------------------------
+
+
+class _ReportingBridge(FakeBridge):
+    """A bridge whose page evaluation answers with the injected script's own report."""
+
+    REPORT = {
+        "url": "https://example.org/pricing",
+        "title": "Pricing",
+        "note": "the enterprise row is the only one without an API",
+        "tone": "info",
+        "highlighted": [{"tag": "tr.enterprise", "text": "Enterprise"}],
+        "matchedAll": 1,
+        "invalidSelector": None,
+        "holdSeconds": None,
+        "autoExpires": False,
+        "cardsOnScreen": 1,
+    }
+
+    async def call_upstream(self, upstream_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        await super().call_upstream(upstream_name, arguments)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"### Result\n{json.dumps(self.REPORT)}\n### Ran Playwright code",
+                }
+            ]
+        }
+
+
+def _running_controls(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    bridge_class: type[FakeBridge] = _ReportingBridge,
+) -> Any:
+    """Approved controls with a (fake) page-evaluation-capable browser already started."""
+    monkeypatch.setattr(browser_module, "AddonBridge", bridge_class)
+    controls = build_browser_controls(
+        enabled=True, manager=_manager(tmp_path, monkeypatch, approve=True)
+    )
+    assert controls is not None
+    bridge = controls.bridge
+    bridge._state = "ready"
+    bridge._running = True
+    return controls
+
+
+async def test_annotate_is_a_control_tool_registered_before_any_approval(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controls = build_browser_controls(enabled=True, manager=_manager(tmp_path, monkeypatch))
+    server = build_server(NullDriver("x"), browser=controls)
+    tools = await _tools(server)
+
+    assert {"browser_annotate", "browser_annotate_clear"} <= set(CONTROL_TOOLS)
+    assert {"browser_annotate", "browser_annotate_clear"} <= set(tools)
+    assert "browser_annotate" in _payload(await _call(server, "browser_status"))["controls"]
+
+
+async def test_annotate_is_described_as_narration_not_privilege(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controls = build_browser_controls(enabled=True, manager=_manager(tmp_path, monkeypatch))
+    server = build_server(NullDriver("x"), browser=controls)
+    tool = (await _tools(server))["browser_annotate"]
+    properties = tool.input_schema.get("properties", {})
+    doc = (
+        tool.description
+        + " "
+        + " ".join(str((properties.get(name) or {}).get("description", "")) for name in properties)
+    )
+
+    assert "human" in tool.description
+    assert "grants no capability" in tool.description
+    assert "browser_annotate_clear" in BROWSER_INSTRUCTIONS
+    # The note is described as displayed-and-untrusted text, never as something parsed.
+    assert "never trusted" in doc
+
+
+async def test_annotate_needs_a_running_browser(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _manager(tmp_path, monkeypatch, approve=True)
+    monkeypatch.setattr(browser_module, "AddonBridge", FakeBridge)
+    controls = build_browser_controls(enabled=True, manager=manager)
+    server = build_server(NullDriver("x"), browser=controls)
+
+    payload = _payload(await _call(server, "browser_annotate", {"note": "looking at the menu"}))
+
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "dependency_missing"
+    assert payload["error"]["capability"] == "browser.annotate"
+    assert "browser_start" in payload["error"]["hint"]
+
+
+async def test_clear_needs_a_running_browser_and_says_so_with_its_own_capability(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _manager(tmp_path, monkeypatch, approve=True)
+    monkeypatch.setattr(browser_module, "AddonBridge", FakeBridge)
+    controls = build_browser_controls(enabled=True, manager=manager)
+    server = build_server(NullDriver("x"), browser=controls)
+
+    payload = _payload(await _call(server, "browser_annotate_clear"))
+
+    assert payload["ok"] is False
+    assert payload["error"]["capability"] == "browser.annotate_clear"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "reason"),
+    [
+        ({"note": "   "}, "empty"),
+        ({"note": "both ways", "selector": "#a", "text": "a"}, "not both"),
+        ({"note": "loud", "tone": "confetti"}, "tone"),
+    ],
+)
+async def test_undrawable_requests_are_invalid_input_not_a_page_call(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any], reason: str
+) -> None:
+    controls = _running_controls(tmp_path, monkeypatch)
+    server = build_server(NullDriver("x"), browser=controls)
+
+    payload = _payload(await _call(server, "browser_annotate", arguments))
+
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "invalid_input"
+    assert reason in payload["error"]["message"]
+    assert controls.bridge.calls == []
+
+
+async def test_annotate_draws_by_evaluating_the_generated_script(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controls = _running_controls(tmp_path, monkeypatch)
+    server = build_server(NullDriver("x"), browser=controls)
+
+    payload = _payload(
+        await _call(
+            server,
+            "browser_annotate",
+            {"note": "the enterprise row has no API", "text": "Enterprise", "tone": "warn"},
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["annotated"] is True
+    assert payload["cleared"] is False
+    assert payload["page"]["highlighted"] == [{"tag": "tr.enterprise", "text": "Enterprise"}]
+
+    name, arguments = controls.bridge.calls[-1]
+    assert name == "browser_evaluate"
+    script = arguments["function"]
+    assert script.lstrip().startswith("async () =>")
+    assert '"note": "the enterprise row has no API"' in script
+    assert '"tone": "warn"' in script
+
+
+async def test_annotate_clear_says_clear_and_needs_no_note(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controls = _running_controls(tmp_path, monkeypatch)
+    server = build_server(NullDriver("x"), browser=controls)
+
+    payload = _payload(await _call(server, "browser_annotate_clear"))
+
+    assert payload["ok"] is True
+    assert payload["cleared"] is True
+    assert payload["annotated"] is False
+    assert '"clear": true' in controls.bridge.calls[-1][1]["function"]
+
+
+async def test_annotate_survives_an_unparsable_page_reply(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controls = _running_controls(tmp_path, monkeypatch, bridge_class=FakeBridge)
+    server = build_server(NullDriver("x"), browser=controls)
+
+    payload = _payload(await _call(server, "browser_annotate", {"note": "hello"}))
+
+    assert payload["ok"] is True
+    assert payload["page"] is None
+    assert payload["raw"]["content"][0]["text"] == "browser_evaluate"
+
+
+async def test_upstream_cannot_shadow_the_annotation_tools(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page tool that happens to be named browser_annotate is not registered over ours."""
+    manager = _manager(tmp_path, monkeypatch, approve=True)
+
+    class ShadowingBridge(FakeBridge):
+        @property
+        def tools(self) -> tuple[Any, ...]:
+            return (
+                _FakeTool("browser_annotate", "annotate"),
+                _FakeTool("browser_navigate", "navigate"),
+            )
+
+    monkeypatch.setattr(browser_module, "AddonBridge", ShadowingBridge)
+    controls = build_browser_controls(enabled=True, manager=manager)
+    server = build_server(NullDriver("x"), browser=controls)
+
+    started = _payload(await _call(server, "browser_start"))
+
+    assert "browser_navigate" in started["tools"]
+    assert "browser_annotate" not in started["tools"]
+    assert set(await _tools(server)) == DRIVER_TOOLS | set(CONTROL_TOOLS) | {"browser_navigate"}

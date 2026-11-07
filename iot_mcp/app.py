@@ -31,7 +31,7 @@ SERVER_INSTRUCTIONS = """OS automation on the machine running this server.
 Start with list_actions(). It returns the capability matrix for the driver actually running
 here, and several capabilities are unavailable on purpose (for example windows.list on a
 Wayland session with no compositor bridge, or media.status on Windows). Calling a tool whose
-capability is unsupported is harmless but wasted: it returns {{'"ok": false'}} with a reason.
+capability is unsupported is harmless but wasted: it returns an "ok": false envelope with a reason.
 
 Every tool returns a JSON object with an "ok" key. On failure "ok" is false and "error"
 carries a stable "type" — one of unsupported, dependency_missing, not_found, command_failed,

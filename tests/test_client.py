@@ -7,21 +7,26 @@ loopback run (real server, real HTTP) is covered by ``tests/test_server_e2e.py``
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import json
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from iot_mcp.client.cli import _dump, _print_endpoints, build_parser
+from iot_mcp.client.cli import _dump, _image_dir, _print_endpoints, _report_images, build_parser
 from iot_mcp.client.connect import (
+    CallResult,
     _payload_from,
     call_tool,
     describe_exception,
+    image_blocks,
     list_tools,
     pick_endpoint,
     resolve_url,
+    save_image_blocks,
 )
 from iot_mcp.config import DEFAULT_MDNS_TYPE
 from iot_mcp.discovery import DiscoveredEndpoint
@@ -342,3 +347,151 @@ def test_an_empty_browse_result_prints_a_plain_sentence() -> None:
     with redirect_stdout(buffer):
         _print_endpoints([])
     assert "no MCP servers" in buffer.getvalue()
+
+
+# --- image content blocks ------------------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\nfake-png-body"
+
+
+def image_result(*blocks: Any, text: str | None = None) -> Any:
+    """A call result carrying ``image`` content blocks, as a screenshot tool returns them."""
+    return types.SimpleNamespace(
+        content=([types.SimpleNamespace(type="text", text=text)] if text else []) + list(blocks),
+        structured_content=None,
+        is_error=False,
+    )
+
+
+def png_block(**overrides: Any) -> Any:
+    fields = {
+        "type": "image",
+        "data": base64.b64encode(PNG).decode(),
+        "mimeType": "image/png",
+    }
+    fields.update(overrides)
+    return types.SimpleNamespace(**fields)
+
+
+def test_image_blocks_are_found_without_disturbing_the_text() -> None:
+    result_ = image_result(png_block(), text="### Page screenshot saved")
+    assert len(image_blocks(result_)) == 1
+    assert _payload_from(result_) == "### Page screenshot saved"
+
+
+def test_an_image_block_is_written_to_disk_and_named_after_its_tool(tmp_path: Any) -> None:
+    written = save_image_blocks(
+        image_result(png_block()), tmp_path / "shots", tool="browser take:screenshot"
+    )
+    assert len(written) == 1
+    path = written[0]
+    assert path.parent.name == "shots"
+    assert path.name.startswith("browser_take_screenshot-")
+    assert path.suffix == ".png"
+    assert path.read_bytes() == PNG
+
+
+def test_mime_type_decides_the_extension_and_unknown_types_get_one(tmp_path: Any) -> None:
+    result_ = image_result(
+        png_block(mimeType="image/jpeg"),
+        png_block(mimeType="image/avif"),
+    )
+    paths = save_image_blocks(result_, tmp_path)
+    assert [path.suffix for path in paths] == [".jpg", ".bin"]
+    assert paths[1].read_bytes() == PNG
+
+
+def test_a_dict_shaped_block_from_a_json_response_is_saved_too(tmp_path: Any) -> None:
+    block = {"type": "image", "data": base64.b64encode(b"gifs").decode(), "mimeType": "image/gif"}
+    paths = save_image_blocks(image_result(block), tmp_path, tool="browser_take_screenshot")
+    assert paths[0].name.startswith("browser_take_screenshot-")
+    assert paths[0].read_bytes() == b"gifs"
+
+
+def test_an_undecodable_image_is_skipped_instead_of_losing_the_result(tmp_path: Any) -> None:
+    result_ = image_result(png_block(data="not base64 at all !!"), png_block(), text="two tries")
+    paths = save_image_blocks(result_, tmp_path)
+    assert len(paths) == 1
+    assert paths[0].read_bytes() == PNG
+
+
+def test_saving_nothing_costs_no_directory(tmp_path: Any) -> None:
+    assert save_image_blocks(result(text="no images"), tmp_path / "never") == []
+    assert not (tmp_path / "never").exists()
+
+
+async def test_call_tool_saves_images_when_told_where(tmp_path: Any) -> None:
+    session = FakeSession({"browser_take_screenshot": image_result(png_block(), text="done")})
+
+    outcome = await call_tool(session, "browser_take_screenshot", image_dir=tmp_path)
+
+    assert outcome.ok is True
+    assert outcome.payload == "done"
+    assert len(outcome.images) == 1
+    assert outcome.raw["image_blocks"] == 1
+    assert "image_note" not in outcome.raw
+    assert outcome.to_dict()["images"] == list(outcome.images)
+    assert outcome.images[0].endswith(".png")
+    assert json.loads(json.dumps(outcome.to_dict()))["images"] == list(outcome.images)
+
+
+async def test_images_are_reported_as_dropped_when_the_caller_wants_no_files() -> None:
+    session = FakeSession({"browser_take_screenshot": image_result(png_block())})
+
+    outcome = await call_tool(session, "browser_take_screenshot")
+
+    assert outcome.images == ()
+    assert outcome.raw["image_blocks"] == 1
+    assert "dropped" in outcome.raw["image_note"]
+    assert "images" not in outcome.to_dict()
+
+
+# --- what the CLI does with them -----------------------------------------------
+
+
+def test_image_destination_comes_from_the_flag_or_the_temp_dir(tmp_path: Any) -> None:
+    args = build_parser().parse_args(["--save-images", str(tmp_path / "shots")])
+    assert _image_dir(args) == tmp_path / "shots"
+    assert _image_dir(build_parser().parse_args(["--save-images", "~/shots"])).parent == Path.home()
+    default = _image_dir(build_parser().parse_args([]))
+    assert default.name == "iot-mcp-images"
+    assert default.is_absolute()
+
+
+def test_saved_images_are_printed_with_their_paths(tmp_path: Any) -> None:
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    outcome = CallResult(
+        tool="browser_take_screenshot",
+        ok=True,
+        payload="done",
+        raw={"is_error": False, "image_blocks": 1},
+        images=(str(tmp_path / "shot.png"),),
+    )
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        _report_images(outcome)
+    assert f"image saved: {tmp_path / 'shot.png'}" in out.getvalue()
+    assert err.getvalue() == ""
+
+
+def test_json_mode_keeps_stdout_parseable_by_sending_paths_elsewhere(tmp_path: Any) -> None:
+    import io
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+
+    outcome = CallResult(
+        tool="browser_take_screenshot",
+        ok=True,
+        payload="done",
+        raw={"is_error": False, "image_blocks": 2, "image_note": "1 image block(s) dropped"},
+        images=(str(tmp_path / "shot.png"),),
+    )
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        _report_images(outcome, stream=sys.stderr)
+    assert json.loads(_dump(outcome.payload)) == "done"
+    assert out.getvalue() == ""
+    assert "image saved" in err.getvalue()
+    assert "dropped" in err.getvalue()

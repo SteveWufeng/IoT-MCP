@@ -169,7 +169,8 @@ Pass-through deliberately uses a small amount of SDK private surface:
 - The published `inputSchema` and description are upstream’s, not a locally maintained mirror.
 - `_preparse()` decodes JSON text into objects/arrays only when upstream schema declares those
   types, preserving strings and unparseable values.
-- Collisions with the five control tools or existing registered names are skipped, never shadowed.
+- Collisions with the control tools (`browser_status` … `browser_annotate_clear`) or existing
+  registered names are skipped, never shadowed.
 
 `mcp>=2.3,<3` is pinned because these are internal touchpoints. If they move, registration fails
 loudly instead of silently exposing a broken tool set.

@@ -106,6 +106,13 @@ allowlist, not a convenience override.
 Agents can only call `browser_request_install`, which files a human-readable note. They cannot
 approve, revoke, install a package, change the approval root, or run an unapproved command.
 
+`browser_annotate` draws on the live page (a caption card, a ring around an element) so a person
+watching the screen can follow what the agent is doing. It changes nothing about the page's own
+content, grants no capability, survives nothing, and is not a channel to the user — the text it is
+given is displayed and never trusted, parsed as data by the server and written to the DOM through
+`textContent`. It is also not a way to spoof a user into approving something: the card is labelled
+as the agent's, and no approval path reads it.
+
 The approval root defaults to `$XDG_CONFIG_HOME/iot-mcp` or `~/.config/iot-mcp`, and can be moved
 with `$IOT_MCP_ADDON_ROOT`. Anyone who can write that directory can approve an add-on, so the state
 root is part of the host trust boundary.

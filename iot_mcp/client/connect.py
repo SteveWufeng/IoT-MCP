@@ -12,12 +12,17 @@ names rather than behaviour:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import inspect
 import json
 import logging
+import re
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession
@@ -60,16 +65,91 @@ class CallResult:
         payload: Structured content when the server provided it, otherwise the decoded text
             content, otherwise the raw text.
         raw: The untouched ``CallToolResult`` fields worth logging.
+        images: Paths the ``image`` content blocks were written to, when an image directory was
+            given. A terminal cannot render a picture, and a text-only model cannot read one, so
+            the honest thing a CLI can do with a screenshot is say where it is.
     """
 
     tool: str
     ok: bool
     payload: Any
     raw: dict[str, Any]
+    images: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable view for printing or feeding back to a model."""
-        return {"tool": self.tool, "ok": self.ok, "payload": self.payload, "raw": self.raw}
+        out: dict[str, Any] = {
+            "tool": self.tool,
+            "ok": self.ok,
+            "payload": self.payload,
+            "raw": self.raw,
+        }
+        if self.images:
+            out["images"] = list(self.images)
+        return out
+
+
+_IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+
+def _block_field(block: Any, name: str) -> Any:
+    """One field of a content block, whether it arrived as an object or as a mapping."""
+    value = getattr(block, name, None)
+    if value is None and isinstance(block, Mapping):
+        value = block.get(name)
+    return value
+
+
+def image_blocks(result: Any) -> list[Any]:
+    """The ``image`` content blocks of a ``CallToolResult`` (possibly empty)."""
+    return [
+        block
+        for block in getattr(result, "content", None) or []
+        if _block_field(block, "type") == "image"
+    ]
+
+
+def save_image_blocks(result: Any, dest_dir: str | Path, *, tool: str = "tool") -> list[Path]:
+    """Write a call's image blocks to disk and return the paths written.
+
+    Args:
+        result: The raw ``CallToolResult`` from the session.
+        dest_dir: Directory to write into; created if missing.
+        tool: Tool name, used to prefix the file names so a screenshot is recognisable in a
+            directory listing.
+
+    Returns:
+        Paths written, in block order. Undecodable blocks are skipped rather than failing the
+        call — a corrupt image is not a reason to lose the text result.
+    """
+    blocks = image_blocks(result)
+    if not blocks:
+        return []
+    directory = Path(dest_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", tool)[:60] or "tool"
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    written: list[Path] = []
+    for index, block in enumerate(blocks):
+        data = _block_field(block, "data")
+        if not isinstance(data, str) or not data:
+            continue
+        try:
+            payload = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        mime = str(_block_field(block, "mimeType") or _block_field(block, "mime_type") or "")
+        suffix = _IMAGE_EXTENSIONS.get(mime.lower(), ".bin")
+        path = directory / f"{stem}-{stamp}-{index:02d}{suffix}"
+        path.write_bytes(payload)
+        written.append(path)
+    return written
 
 
 def _payload_from(result: Any) -> Any:
@@ -140,6 +220,7 @@ async def call_tool(
     arguments: Mapping[str, Any] | None = None,
     *,
     timeout: float = 30.0,
+    image_dir: str | Path | None = None,
 ) -> CallResult:
     """Call one tool on a connected session.
 
@@ -149,6 +230,9 @@ async def call_tool(
         arguments: Tool arguments; most of this server's tools take none.
         timeout: Seconds to wait for this call before giving up. A hung server must not hang the
             client.
+        image_dir: Where to save ``image`` content blocks. ``None`` drops them (the count is
+            still reported in ``raw``), because silently discarding them would look like the
+            server never sent a screenshot.
 
     Returns:
         A :class:`CallResult`. Transport-level failures come back as ``ok=False`` with an
@@ -185,11 +269,19 @@ async def call_tool(
     # A tool can report ok:false without setting isError (this server does: failures are data),
     # so surface both signals in CallResult.ok.
     payload_failed = isinstance(payload, Mapping) and payload.get("ok") is False
+    blocks = image_blocks(result)
+    images = save_image_blocks(result, image_dir, tool=name) if image_dir is not None else []
+    raw: dict[str, Any] = {"is_error": is_error}
+    if blocks:
+        raw["image_blocks"] = len(blocks)
+        if image_dir is None:
+            raw["image_note"] = f"{len(blocks)} image block(s) dropped: no --save-images dir"
     return CallResult(
         tool=name,
         ok=not (is_error or payload_failed),
         payload=payload,
-        raw={"is_error": is_error},
+        raw=raw,
+        images=tuple(str(path) for path in images),
     )
 
 

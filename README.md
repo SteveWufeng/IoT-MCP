@@ -51,6 +51,10 @@ browser: disabled (default)
 Useful flags: `--port`, `--path`, `--driver`, `--no-mdns`, `--mdns-type`, `--allow-host`,
 `--stateless`, `--token-file`, `--browser`. `python -m iot_mcp --help` is authoritative.
 
+Want the browser tier as well? Run `pixi run browser-setup` (or `browser-setup-headed` for a window
+you can watch) once, then serve with `pixi run browser` — flags still apply
+(`pixi run browser --expose --token-file …`). See [the browser tier](#optional-browser-tier).
+
 **On computer A — drive:**
 
 ```sh
@@ -79,6 +83,12 @@ verbatim, so `jq` works on it:
 ```sh
 iot-mcp-client --url … --call media_status --json | jq -r '.playing.title // "nothing playing"'
 ```
+
+A tool that answers with a picture (`browser_take_screenshot`) gets one more step: the client
+writes each image block to a file and prints where it went, because a terminal cannot draw a
+picture and a text-only model cannot read one. `--save-images DIR` picks the directory (default: a
+temp dir), `--open-images` hands each file to the desktop viewer, and under `--json` the paths are
+printed on stderr so stdout stays `jq`-friendly.
 
 ### Other clients
 
@@ -138,19 +148,51 @@ client can require confirmation without parsing prose.
 
 ### Optional browser tier
 
-Passing `--browser` registers five lifecycle tools — `browser_status`, `browser_start`,
-`browser_stop`, `browser_install_status`, and `browser_request_install`. Registration is not
-approval: nothing launches until the operator runs the human-only CLI:
+Passing `--browser` registers seven tools — the lifecycle ones (`browser_status`, `browser_start`,
+`browser_stop`, `browser_install_status`, `browser_request_install`) plus two narration ones
+(`browser_annotate`, `browser_annotate_clear`). Registration is not approval:
+nothing launches until the operator has set the browser up at a terminal on that machine. From a
+clean checkout, the whole setup is:
 
 ```sh
-pixi run addons pending
-pixi run addons install browser
+pixi run browser-setup           # node + chromium, then the typed approval — headless
+pixi run browser-setup-headed    # ... or: the browser opens a real window on this desktop
+pixi run browser                 # start the server; the mode is whatever you approved
 ```
 
+Both setup commands are idempotent — re-running downloads nothing new and only asks again if you
+are changing mode — and both stop at a prompt you have to answer by typing `approve browser`. That
+prompt is the security model, so nothing answers it for you: an agent can only *ask*
+(`browser_request_install`), never install, approve, launch, download, or substitute a browser
+command.
+
+The mode is an **approval**, not a flag: the record pins the exact launch argv by fingerprint and
+the server runs that record. Which is why `pixi run browser` needs no `--browser-argv` — pass it
+only to deliberately override, and a mismatch with the approval is refused. The two argv strings
+exist in exactly one place, `pixi.toml` (`browser-approve`, `browser-approve-headed`).
+
+Headed is louder by construction: no `--headless`, so a window opens, can take focus, and is
+visible to anyone looking at the screen or sharing it. To make the window appear, the bridge hands
+the browser process this session's compositor handle — the Wayland socket on a Wayland session,
+`DISPLAY` on an X11 one, never both. `browser_status` says which under `bridge.desktop`
+(`wayland` / `x11` / `none`); `none` on a desktop session is a bug or a headless approval, and
+[Troubleshooting](docs/troubleshooting.md) covers both.
+
+A window is only transparent if the person watching can see *what the agent is looking at*, and a
+screenshot does not travel there — it goes to the caller. So `browser_annotate(note, text=...)`
+draws the agent's own words into the live page: a corner card, optionally a box around one element
+with the rest dimmed. `browser_annotate_clear()` takes it away, and so does navigating away. It is
+cosmetic: it grants nothing, approves nothing, and nothing it is told is trusted.
+
+Underlying tasks, if you want them individually: `pixi run -e browser browser-install`,
+`browser-list`, `browser-approve`, `browser-approve-headed`, `browser-serve`. The generic add-on
+CLI is still there too — `pixi run addons pending`, `pixi run addons install browser` (packaged
+default: chrome channel, headless). Server flags go after the task name:
+`pixi run browser --expose --token-file ~/.config/iot-mcp/token`.
+
 After approval, `browser_start` bridges the upstream `@playwright/mcp` server and dynamically adds
-its page tools (for example `browser_navigate`) to `tools/list`. `browser_stop` removes them again.
-Agents may file a request; they cannot install, approve, launch, download, or run an alternate
-browser command. The approved argv is fingerprinted, and a mismatched `--browser-argv` is refused.
+its page tools (for example `browser_navigate`) to `tools/list`; `browser_stop` removes them again.
+The bridge is only a *client* of that server, and the approved argv is the only command it can run.
 
 Two traps the annotation does not cover:
 

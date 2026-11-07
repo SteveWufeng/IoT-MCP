@@ -23,3 +23,6 @@ session-*.md
 # Generated bearer tokens. A token in the repo is a leaked token, and `--generate-token`
 # without --token-file drops one in the current directory if you are not paying attention.
 /token
+
+# Playwright MCP's own scratch output (console logs, page snapshots) lands in the server's cwd.
+.playwright-mcp/

@@ -21,9 +21,9 @@ from typing import Any
 from .addons import (
     DEFAULT_LAUNCH,
     PLAYWRIGHT_PACKAGE_SPEC,
-    RISK_STATEMENT,
     AddonError,
     AddonManager,
+    risk_statement,
 )
 
 __all__ = ["build_parser", "main"]
@@ -187,10 +187,10 @@ def _cmd_request(args: argparse.Namespace, manager: AddonManager, out: Any) -> i
 def _cmd_install(args: argparse.Namespace, manager: AddonManager, out: Any) -> int:
     argv = _parse_argv(args.argv) if args.argv else None
     _show_install_context(args.name, manager, out)
+    launch = argv if argv is not None else DEFAULT_LAUNCH.get(args.name)
 
     print(file=out)
-    print(RISK_STATEMENT, file=out)
-    launch = argv if argv is not None else DEFAULT_LAUNCH.get(args.name)
+    print(risk_statement(headless=launch is None or "--headless" in launch), file=out)
     if launch is None:
         print(
             f"no default launch command for {args.name!r}; pass --argv with the exact command "

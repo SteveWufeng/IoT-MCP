@@ -105,16 +105,74 @@ A server bind that is LAN-reachable with browser enabled and no token is refused
 token, bind to loopback, or explicitly pass `--browser-allow-no-auth` only for a network you already
 trust. The escape hatch should not be used to bypass a missing token.
 
-If status says not approved, have the operator run:
+If status says not approved, the operator runs the one-time setup at a terminal on that machine (it
+fetches node and chromium, then asks for the typed approval):
 
 ```sh
-pixi run addons pending
-pixi run addons install browser
+pixi run browser-setup           # or: pixi run browser-setup-headed
+pixi run browser
 ```
 
-Then `browser_start` may launch the approved argv. If the operator changes `--browser-argv`, the
-fingerprint will differ and the server will refuse to launch it; approve the intended command instead
-of repointing the running approval to something else.
+Then `browser_start` runs the approved argv — the server needs no `--browser-argv` at all, because
+the approved record *is* the launch. Passing a different one is refused: the fingerprint is the
+approval, so approve the launch you want rather than repointing a running approval.
+
+### It started, but every page tool says `Chromium distribution 'chrome' is not found`
+
+The bridge is up but has no browser to open. Upstream `@playwright/mcp` defaults to the *chrome
+channel* — Google Chrome at `/opt/google/chrome/chrome` — which is not installed on a machine that
+only has Brave, and which `playwright install chrome` can only provision on Debian/Ubuntu. Use the
+chromium build instead:
+
+```sh
+pixi run -e browser browser-install   # the revision the add-on's own playwright expects
+pixi run -e browser browser-list      # confirm it landed in ~/.cache/ms-playwright
+```
+
+The chrome channel is what the *packaged* default launch names; the setup tasks approve chromium
+instead, so re-running setup fixes this case too:
+
+```sh
+pixi run browser-setup           # headless chromium
+pixi run browser-setup-headed    # visible window
+pixi run browser
+```
+
+Note where the truth lives: `browser_status` reports `running: true, state: "ready"` for this
+failure, because readiness means the bridge process answered `tools/list` — not that a page can
+exist. The failing page tool is the honest signal.
+
+### Headed approval, but nothing ever appears on screen
+
+Everything reports success — the page loads, screenshots come back, `browser_evaluate` answers —
+and there is no window. Three independent layers can each force headless, so check them in order:
+
+1. **The launch argv really is headed.** `--headless` in `browser_status`'s `launch` list means the
+   approval still says headless; the fingerprint forces a new approval to change it. Fix: re-run
+   `pixi run browser-setup-headed`, then restart the server.
+2. **The child got a compositor handle.** The MCP SDK hands stdio servers a scrubbed environment
+   (`PATH`, `HOME`, …) and drops `WAYLAND_DISPLAY`/`DISPLAY` with it. A headed launch re-attaches
+   the handle it needs — see `bridge.desktop` (`wayland` / `x11` / `none`) in `browser_status`;
+   `none` on a desktop session means there is no compositor to reach.
+3. **Upstream's own heuristic.** `@playwright/mcp` sets `headless = true` on Linux whenever
+   `DISPLAY` is unset, which catches Wayland sessions that deliberately never get an X11 handle.
+   The bridge pins `PLAYWRIGHT_MCP_HEADLESS=false` for headed launches; if you launch the add-on
+   some other way, set it yourself.
+
+Layers 2 and 3 are handled by the bridge in this repo, so a browser started by an older server
+process still behaves like the old one — restart it (`pixi run browser`) before debugging further.
+
+Verify with the process rather than the compositor's idea of it:
+
+```sh
+pid=$(pgrep -f 'ms-playwright/chromium.*/chrome --' | head -1)
+tr '\0' '\n' < /proc/$pid/cmdline | grep -c '^--headless$'    # 0 = really headed
+tr '\0' '\n' < /proc/$pid/environ | grep -E '^(DISPLAY|WAYLAND_DISPLAY)='
+hyprctl clients -j | jq -r '.[].class' | sort -u              # the window the WM actually maps
+```
+
+On Hyprland the WM, not the browser, decides visibility: a client that is spawned but never mapped
+shows in `ps` and nowhere in `hyprctl clients`.
 
 ## Opening the port (operator runs these on B)
 

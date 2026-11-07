@@ -11,7 +11,10 @@ The subprocess bypasses :mod:`iot_mcp.drivers._proc` by design: ``_proc`` owns *
 invocations (short-lived argv→stdout calls); this is a long-lived protocol peer the SDK
 owns end-to-end. The compensating control is that the argv can only ever be an
 operator-approved fingerprint (:mod:`iot_mcp.addons`), and only the operator's own
-``install`` command writes one.
+``install`` command writes one. One exception to that scrubbed inheritance: a *headed*
+launch re-attaches the compositor handle (:func:`_desktop_env`) so the window is visible on
+this host's desktop — which is the point of headed mode, and is what the approval record
+warns about ("a window will open on this host").
 
 Threading: ``stdio_client`` enters anyio cancellable scopes, so the context managers must
 be entered *and exited* inside one task. That task (``_supervise``) pulls operations off a
@@ -24,12 +27,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 
 from .addons import AddonEntry
 from .errors import CommandFailedError, DependencyMissingError, InvalidInputError, NotFoundError
@@ -47,6 +52,50 @@ STATE_STARTING = "starting"
 STATE_READY = "ready"
 STATE_STOPPED = "stopped"
 STATE_FAILED = "failed"
+
+#: Session variables a *headed* add-on needs to place a window on this host. Wayland is
+#: preferred and only its socket is forwarded; ``DISPLAY`` is handed over on a pure X11
+#: session only, because an X11 client can also observe every other window on that display.
+_WAYLAND_VARS: tuple[str, ...] = ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "XDG_RUNTIME_DIR")
+_X11_VARS: tuple[str, ...] = ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR")
+
+#: Upstream heuristic to defeat: ``@playwright/mcp`` forces ``headless = true`` on Linux
+#: whenever ``DISPLAY`` is unset, so a Wayland-only launch silently goes headless. The env
+#: override beats that branch because it is applied before the heuristic's ``undefined``
+#: check (:func:`_desktop_env` never sets ``DISPLAY`` on a Wayland session on purpose).
+_FORCE_HEADED_ENV: tuple[str, str] = ("PLAYWRIGHT_MCP_HEADLESS", "false")
+
+
+def _desktop_env(launch: Sequence[str]) -> tuple[dict[str, str], str]:
+    """Environment for the add-on, plus the desktop handle a headed window needs.
+
+    The MCP SDK hands stdio servers a deliberately scrubbed environment (``PATH``, ``HOME``
+    and a few friends) — which also drops the compositor handle, so an add-on launched
+    *headed* finds no display and silently falls back to headless. Headed launches
+    therefore re-attach the minimum needed to map a window, and say so to the upstream in a
+    way that heuristic cannot override; headless ones get nothing more than the SDK default.
+
+    Args:
+        launch: The approved argv, inspected for ``--headless``.
+
+    Returns:
+        Tuple of the child environment and what was forwarded for it: ``wayland``, ``x11``
+        or ``none``.
+    """
+    env = get_default_environment()
+    if "--headless" in launch:
+        return env, "none"
+    session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    names, kind = (_X11_VARS, "x11") if session == "x11" else (_WAYLAND_VARS, "wayland")
+    for key in names:
+        value = os.environ.get(key)
+        if value and not value.startswith("()"):  # SDK guard: never forward shell functions
+            env[key] = value
+    anchor = "DISPLAY" if kind == "x11" else "WAYLAND_DISPLAY"
+    if not env.get(anchor):
+        return env, "none"
+    env[_FORCE_HEADED_ENV[0]] = _FORCE_HEADED_ENV[1]
+    return env, kind
 
 
 @dataclass(frozen=True)
@@ -113,6 +162,7 @@ class AddonBridge:
         self._last_error: str | None = None
         self._tools: tuple[BridgeTool, ...] = ()
         self._started_at: float | None = None
+        self._desktop = "none"
 
     # ----------------------------------------------------------------------- inspection
 
@@ -153,6 +203,7 @@ class AddonBridge:
             "last_error": self._last_error,
             "launch": list(self._entry.argv),
             "headless": self._entry.headless,
+            "desktop": self._desktop,
             "approved_by": self._entry.approved_by,
             "approved_at": self._entry.approved_at,
         }
@@ -308,9 +359,17 @@ class AddonBridge:
         """Own the upstream session inside this task, serving the operation queue."""
         session: ClientSession | None = None
         try:
+            env, self._desktop = _desktop_env(self._entry.argv)
+            if self._desktop != "none":
+                log.info(
+                    "add-on %s is headed: forwarding the %s session handle",
+                    self._entry.name,
+                    self._desktop,
+                )
             params = StdioServerParameters(
                 command=self._entry.argv[0],
                 args=list(self._entry.argv[1:]),
+                env=env,
             )
             async with stdio_client(params) as streams:
                 read, write = streams[0], streams[1]

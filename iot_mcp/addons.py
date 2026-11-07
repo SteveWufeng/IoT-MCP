@@ -41,7 +41,9 @@ __all__ = [
     "AddonManager",
     "DEFAULT_BROWSER_ARGS",
     "PLAYWRIGHT_PACKAGE_SPEC",
+    "HEADED_RISK",
     "RISK_STATEMENT",
+    "risk_statement",
     "default_manager",
     "default_root",
     "fingerprint_argv",
@@ -98,6 +100,29 @@ Understand exactly what this enables:
 There is no TLS here. If this server is --expose'd, the add-on will refuse to run unless a
 bearer token is configured (--token / --token-file); prefer a token plus an SSH tunnel.
 """
+
+#: Added to the risk text when the approved launch is not headless. The base text describes a
+#: headless instance; a headed one is visible to the room, not just to the model.
+HEADED_RISK = """\
+This launch is HEADED (no ``--headless`` in the argv), so add to the above:
+  * A real window opens on this machine's desktop, can take focus, and is visible to anyone
+    looking at the screen, to screen shares, and to screenshots.
+  * To make that window appear, the server hands the browser process this session's compositor
+    handle — the Wayland socket, or ``DISPLAY`` on an X11 session (never both).
+"""
+
+
+def risk_statement(headless: bool = True) -> str:
+    """Risk text for one specific launch, headed or not.
+
+    Args:
+        headless: Whether the launch argv carries ``--headless``.
+
+    Returns:
+        :data:`RISK_STATEMENT`, plus :data:`HEADED_RISK` when the launch opens a window.
+    """
+    return RISK_STATEMENT if headless else RISK_STATEMENT + HEADED_RISK
+
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 

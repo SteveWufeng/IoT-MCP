@@ -27,8 +27,37 @@ pytest = ">=8"
 pytest-asyncio = ">=0.24"
 ruff = ">=0.6"
 
+# The browser add-on is a bridge to the upstream @playwright/mcp npm server, so it needs node and
+# npx. Declared here rather than assumed from whatever is on PATH: `browser_start` fails with
+# "browser is not found" when the environment happens to have node but no browser binary, and an
+# environment that has neither fails differently enough to be confusing.
+[feature.browser.dependencies]
+nodejs = ">=22"
+
+[feature.browser.tasks]
+# One-time fetch of the browser binary the add-on drives. `-p @playwright/mcp@latest` is the whole
+# point: it runs the *playwright that the add-on itself depends on*, so the chromium revision
+# downloaded here is exactly the revision `browser_start` will look for. A plain
+# `npx playwright install chromium` uses the latest stable playwright and can download a revision
+# the add-on does not know about, which fails as "Chromium distribution 'chrome' is not found".
+# Chromium, not the chrome channel: chromium lands in ~/.cache/ms-playwright with no root, while
+# `install chrome` installs Google's package and only supports Debian/Ubuntu.
+browser-install = "npx -y -p @playwright/mcp@latest playwright install chromium"
+# What is actually downloaded, and where. Run this before debugging "browser is not found".
+browser-list = "npx -y -p @playwright/mcp@latest playwright install --list"
+# The two launches an operator can approve. These strings ARE the approval: the record pins the
+# argv by fingerprint, so the strings live here (once) rather than in shell history. Changing one
+# — headless ↔ headed — is an approval change, which is why it asks to be typed again.
+browser-approve = "python -m iot_mcp.addons_cli install browser --argv \"npx -y @playwright/mcp@latest --headless --browser chromium\""
+browser-approve-headed = "python -m iot_mcp.addons_cli install browser --argv \"npx -y @playwright/mcp@latest --browser chromium\""
+# Server with the add-on wired up. No `--browser-argv`: the approved record IS the launch. Pass any
+# server flags after the task name, e.g. `pixi run -e browser browser-serve --expose --token-file PATH`.
+browser-serve = "python -m iot_mcp --browser"
+
 [environments]
 default = ["dev"]
+# `pixi run -e browser server --browser ...` for a server that can actually start the add-on.
+browser = ["dev", "browser"]
 
 [tasks]
 # Run the OS-automation MCP server on "computer B". Defaults to 127.0.0.1:8000 with no token;
@@ -36,6 +65,18 @@ default = ["dev"]
 server = "python -m iot_mcp"
 # Operator-side approval of optional add-ons (browser). Humans only.
 addons = "python -m iot_mcp.addons_cli"
+# Browser tier, from a clean checkout, in one line each. Both fetch node + chromium and then stop
+# for a typed approval — that prompt is the security gate, so it is never answered for you:
+#   pixi run browser-setup          headless chromium
+#   pixi run browser-setup-headed   a real window on this machine's desktop
+# After that the server needs no flags and no argv (the approved record IS the launch):
+#   pixi run browser
+browser-setup = "pixi run -e browser browser-install && pixi run -e browser browser-approve"
+browser-setup-headed = "pixi run -e browser browser-install && pixi run -e browser browser-approve-headed"
+# `pixi run server --browser` without remembering which environment carries node. Server flags still
+# work (`pixi run browser --expose --token-file PATH`); for anything exotic use the browser env:
+# `pixi run -e browser browser-serve ...`.
+browser = "pixi run -e browser browser-serve"
 # Mint a bearer token: `pixi run token` prints one, `pixi run token --token-file PATH` stores it.
 token = "python -m iot_mcp --generate-token"
 # Browse for advertised servers on the LAN (computer A), no connection attempted.

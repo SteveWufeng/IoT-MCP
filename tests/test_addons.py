@@ -10,10 +10,13 @@ import pytest
 
 from iot_mcp.addons import (
     DEFAULT_BROWSER_ARGS,
+    HEADED_RISK,
+    RISK_STATEMENT,
     AddonEntry,
     AddonError,
     AddonManager,
     fingerprint_argv,
+    risk_statement,
 )
 
 
@@ -233,3 +236,10 @@ def test_default_root_falls_back_to_home_config(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setattr(Path, "home", lambda: Path("/tmp/home-test"))
     assert default_root() == Path("/tmp/home-test/.config/iot-mcp")
+
+
+def test_risk_statement_is_mode_specific() -> None:
+    """A headed approval must be told about the window; a headless one must not be."""
+    assert risk_statement(headless=True) == RISK_STATEMENT
+    assert HEADED_RISK not in risk_statement(headless=True)
+    assert risk_statement(headless=False) == RISK_STATEMENT + HEADED_RISK

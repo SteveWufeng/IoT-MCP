@@ -142,6 +142,28 @@ Note where the truth lives: `browser_status` reports `running: true, state: "rea
 failure, because readiness means the bridge process answered `tools/list` — not that a page can
 exist. The failing page tool is the honest signal.
 
+### Use Brave instead of the downloaded Chromium
+
+There is no MCP package that needs to be installed as `playwright-brave` for this. Brave is
+Chromium-based; the official `@playwright/mcp` server can drive an installed Brave binary with
+`--browser chromium --executable-path /usr/bin/brave --isolated`.
+
+Install Brave locally first. The provided setup checks for `/usr/bin/brave`, then asks
+for the usual typed approval:
+
+```sh
+pixi run browser-brave-setup           # headless Brave
+pixi run browser-brave-setup-headed    # visible Brave window
+pixi run browser
+```
+
+If Brave lives at another path, approve the exact command manually instead of using the task;
+the path is part of the fingerprint. One approval record is active at a time, so this replaces a
+previous Chromium approval. The launch is fully isolated: `--isolated` keeps the browser's
+profile in memory and nothing touches your real Brave profile. Without it, a second Brave
+process hands its window to your *running* Brave instance — same default profile — so the agent
+would land on your real, logged-in tabs. (Verified live by driving the MCP server directly.)
+
 ### Headed approval, but nothing ever appears on screen
 
 Everything reports success — the page loads, screenshots come back, `browser_evaluate` answers —

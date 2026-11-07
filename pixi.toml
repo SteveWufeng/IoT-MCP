@@ -50,6 +50,13 @@ browser-list = "npx -y -p @playwright/mcp@latest playwright install --list"
 # — headless ↔ headed — is an approval change, which is why it asks to be typed again.
 browser-approve = "python -m iot_mcp.addons_cli install browser --argv \"npx -y @playwright/mcp@latest --headless --browser chromium\""
 browser-approve-headed = "python -m iot_mcp.addons_cli install browser --argv \"npx -y @playwright/mcp@latest --browser chromium\""
+# Brave is another engine choice, not another MCP server. It is a Chromium-based browser, so the
+# official @playwright/mcp server is pointed at the locally installed Brave executable with
+# --executable-path. --isolated is load-bearing: without it Brave delegates to your running
+# instance and the agent would see your real, logged-in tabs. Approving either Brave launch
+# replaces the current browser approval record; there is no separate playwright-brave package.
+browser-brave-approve = "python -m iot_mcp.addons_cli install browser --argv \"npx -y @playwright/mcp@latest --headless --browser chromium --executable-path /usr/bin/brave --isolated\""
+browser-brave-approve-headed = "python -m iot_mcp.addons_cli install browser --argv \"npx -y @playwright/mcp@latest --browser chromium --executable-path /usr/bin/brave\""
 # Server with the add-on wired up. No `--browser-argv`: the approved record IS the launch. Pass any
 # server flags after the task name, e.g. `pixi run -e browser browser-serve --expose --token-file PATH`.
 browser-serve = "python -m iot_mcp --browser"
@@ -73,6 +80,11 @@ addons = "python -m iot_mcp.addons_cli"
 #   pixi run browser
 browser-setup = "pixi run -e browser browser-install && pixi run -e browser browser-approve"
 browser-setup-headed = "pixi run -e browser browser-install && pixi run -e browser browser-approve-headed"
+# Brave setup does not download Chromium: install Brave locally first, then approve the engine
+# launch. This replaces the current browser approval record, so the Chromium and Brave launches
+# are alternatives, not two simultaneous tiers.
+browser-brave-setup = "ls /usr/bin/brave && pixi run -e browser browser-brave-approve"
+browser-brave-setup-headed = "ls /usr/bin/brave && pixi run -e browser browser-brave-approve-headed"
 # `pixi run server --browser` without remembering which environment carries node. Server flags still
 # work (`pixi run browser --expose --token-file PATH`); for anything exotic use the browser env:
 # `pixi run -e browser browser-serve ...`.

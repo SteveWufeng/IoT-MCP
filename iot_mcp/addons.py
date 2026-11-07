@@ -39,6 +39,8 @@ __all__ = [
     "AddonEntry",
     "AddonError",
     "AddonManager",
+    "BRAVE_BROWSER_ARGS",
+    "BRAVE_HEADED_BROWSER_ARGS",
     "DEFAULT_BROWSER_ARGS",
     "PLAYWRIGHT_PACKAGE_SPEC",
     "HEADED_RISK",
@@ -57,6 +59,38 @@ PLAYWRIGHT_PACKAGE_SPEC = "@playwright/mcp@latest"
 #: Default stdio launch for the ``browser`` add-on: npx, pinned-ish spec, headless so
 #: nothing appears on the host user's display without them having asked.
 DEFAULT_BROWSER_ARGS: tuple[str, ...] = ("npx", "-y", PLAYWRIGHT_PACKAGE_SPEC, "--headless")
+
+#: Alternative engine launches for the same ``browser`` approval. They are not separate add-ons,
+#: because the server loads one approved launch per add-on name: approving one replaces the record
+#: for the add-on. Brave is a Chromium-based browser, so it uses the Chromium engine with the
+#: official ``@playwright/mcp`` server pointed at the locally installed Brave executable. There is
+#: no separate ``playwright-brave`` MCP dependency to install: npm currently has no package by
+#: that name, and Playwright's documented route is ``--executable-path``.
+#: ``--isolated`` is load-bearing here: without it, a second Brave process delegates to the
+#: user's *running* Brave instance (same default profile), so the agent would see and could act
+#: on the operator's real, logged-in tabs. An in-memory profile is also the whole point of the
+#: approval — verified live: with ``--isolated`` the first page has exactly one tab.
+BRAVE_BROWSER_ARGS: tuple[str, ...] = (
+    "npx",
+    "-y",
+    PLAYWRIGHT_PACKAGE_SPEC,
+    "--headless",
+    "--browser",
+    "chromium",
+    "--executable-path",
+    "/usr/bin/brave",
+    "--isolated",
+)
+BRAVE_HEADED_BROWSER_ARGS: tuple[str, ...] = (
+    "npx",
+    "-y",
+    PLAYWRIGHT_PACKAGE_SPEC,
+    "--browser",
+    "chromium",
+    "--executable-path",
+    "/usr/bin/brave",
+    "--isolated",
+)
 
 #: Add-on name → default launch argv.
 DEFAULT_LAUNCH: dict[str, tuple[str, ...]] = {"browser": DEFAULT_BROWSER_ARGS}

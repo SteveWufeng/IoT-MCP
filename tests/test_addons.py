@@ -9,8 +9,11 @@ from typing import Any
 import pytest
 
 from iot_mcp.addons import (
+    BRAVE_BROWSER_ARGS,
+    BRAVE_HEADED_BROWSER_ARGS,
     DEFAULT_BROWSER_ARGS,
     HEADED_RISK,
+    PLAYWRIGHT_PACKAGE_SPEC,
     RISK_STATEMENT,
     AddonEntry,
     AddonError,
@@ -40,6 +43,28 @@ def _write_entry(manager: AddonManager, name: str, record: dict[str, Any]) -> Pa
 def test_fingerprint_is_over_exact_argv_not_just_a_join() -> None:
     assert fingerprint_argv(("a", "bc")) != fingerprint_argv(("ab", "c"))
     assert fingerprint_argv(["npx", "-y", "pkg"]) == fingerprint_argv(("npx", "-y", "pkg"))
+
+
+def test_brave_launches_still_use_official_playwright_mcp() -> None:
+    assert PLAYWRIGHT_PACKAGE_SPEC in BRAVE_BROWSER_ARGS
+    assert "--browser" in BRAVE_BROWSER_ARGS
+    assert "--executable-path" in BRAVE_BROWSER_ARGS
+    assert "/usr/bin/brave" in BRAVE_BROWSER_ARGS
+    assert "--headless" in BRAVE_BROWSER_ARGS
+
+
+def test_brave_launches_are_isolated_from_the_users_real_profile() -> None:
+    # Without --isolated, a second Brave process delegates to the running instance and the
+    # agent could drive the operator's logged-in tabs. Verified live against @playwright/mcp.
+    assert "--isolated" in BRAVE_BROWSER_ARGS
+    assert "--isolated" in BRAVE_HEADED_BROWSER_ARGS
+
+
+def test_brave_headed_launch_differs_from_headless_only_by_window_mode() -> None:
+    assert "--headless" not in BRAVE_HEADED_BROWSER_ARGS
+    assert [arg for arg in BRAVE_HEADED_BROWSER_ARGS if arg != "--headless"] == [
+        arg for arg in BRAVE_BROWSER_ARGS if arg != "--headless"
+    ]
 
 
 def test_manager_uses_explicit_root_over_environment(tmp_path: Path) -> None:

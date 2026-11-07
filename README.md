@@ -160,6 +160,14 @@ pixi run browser-setup-headed    # ... or: the browser opens a real window on th
 pixi run browser                 # start the server; the mode is whatever you approved
 ```
 
+Brave is an alternative engine for the same official `@playwright/mcp` server. Install Brave
+locally, then run `pixi run browser-brave-setup` (or `browser-brave-setup-headed`) to approve
+`@playwright/mcp` with `--browser chromium --executable-path /usr/bin/brave --isolated`. The
+`--isolated` flag is load-bearing: without it, Brave hands the new window to your *running* Brave
+instance, so the agent would drive your real, logged-in tabs. There is no separate
+`playwright-brave` MCP package to install. One approval record is active at a time, so this
+replaces the Chromium record.
+
 Both setup commands are idempotent — re-running downloads nothing new and only asks again if you
 are changing mode — and both stop at a prompt you have to answer by typing `approve browser`. That
 prompt is the security model, so nothing answers it for you: an agent can only *ask*
@@ -168,8 +176,9 @@ command.
 
 The mode is an **approval**, not a flag: the record pins the exact launch argv by fingerprint and
 the server runs that record. Which is why `pixi run browser` needs no `--browser-argv` — pass it
-only to deliberately override, and a mismatch with the approval is refused. The two argv strings
-exist in exactly one place, `pixi.toml` (`browser-approve`, `browser-approve-headed`).
+only to deliberately override, and a mismatch with the approval is refused. The four approved argv
+strings exist in exactly one place, `pixi.toml` (`browser-approve`, `browser-approve-headed`,
+`browser-brave-approve`, `browser-brave-approve-headed`).
 
 Headed is louder by construction: no `--headless`, so a window opens, can take focus, and is
 visible to anyone looking at the screen or sharing it. To make the window appear, the bridge hands
@@ -185,7 +194,8 @@ with the rest dimmed. `browser_annotate_clear()` takes it away, and so does navi
 cosmetic: it grants nothing, approves nothing, and nothing it is told is trusted.
 
 Underlying tasks, if you want them individually: `pixi run -e browser browser-install`,
-`browser-list`, `browser-approve`, `browser-approve-headed`, `browser-serve`. The generic add-on
+`browser-list`, `browser-approve`, `browser-approve-headed`, `browser-brave-approve`,
+`browser-brave-approve-headed`, `browser-serve`. The generic add-on
 CLI is still there too — `pixi run addons pending`, `pixi run addons install browser` (packaged
 default: chrome channel, headless). Server flags go after the task name:
 `pixi run browser --expose --token-file ~/.config/iot-mcp/token`.

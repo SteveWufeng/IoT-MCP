@@ -8,7 +8,13 @@ import pathlib
 
 import pytest
 
-from iot_mcp.cli import _transport_security, build_parser, config_from_args, main
+from iot_mcp.cli import (
+    _transport_security,
+    build_parser,
+    config_from_args,
+    consent_gate,
+    main,
+)
 from iot_mcp.config import (
     DEFAULT_HOST,
     DEFAULT_MCP_PATH,
@@ -130,8 +136,32 @@ def test_txt_records_describe_the_transport_and_mount_point() -> None:
     txt = ServerConfig(path="/mcp").txt_records()
     assert txt["path"] == "/mcp"
     assert txt["transport"] == "streamable-http"
-    assert set(txt) == {"path", "transport", "name", "version"}
+    assert set(txt) == {"path", "transport", "name", "version", "auth", "browser"}
     assert json.dumps(txt)
+
+
+def test_txt_records_declare_the_auth_and_browser_policy_but_no_secret() -> None:
+    """A client should learn "this server wants a token" before it handshakes, not from a 401.
+
+    The two extra TXT keys are policy, never material: neither the token nor its fingerprint nor
+    the add-on's launch command belongs in a record every host on the LAN can read.
+    """
+    open_loopback = ServerConfig().txt_records()
+    assert open_loopback["auth"] == "none"
+    assert open_loopback["browser"] == "off"
+
+    locked = ServerConfig(token="a-token-of-sufficient-length", browser_enabled=True).txt_records()
+    assert locked["auth"] == "token"
+    assert locked["browser"] == "on"
+    assert "a-token-of-sufficient-length" not in json.dumps(locked)
+
+
+def test_an_explicit_no_auth_downgrades_the_declared_policy() -> None:
+    """``--no-auth`` against an environmental token must not advertise ``auth=token``."""
+    config = ServerConfig(token="a-token-of-sufficient-length", no_auth=True)
+    assert config.authenticated is False
+    assert config.auth_settings() is None
+    assert config.txt_records()["auth"] == "none"
 
 
 # --- the exposure warning ------------------------------------------------------
@@ -162,6 +192,84 @@ def test_the_warning_reports_whether_host_validation_is_on() -> None:
     narrowed = io.StringIO()
     ServerConfig(host="0.0.0.0", allowed_hosts=("B.local:8000",)).warn_if_exposed(narrowed)
     assert "B.local:8000" in narrowed.getvalue()
+
+
+def test_an_authenticated_lan_bind_warns_about_cleartext_not_about_being_open() -> None:
+    """The banner has to describe the configuration that is actually running.
+
+    A token changes the exposure from "anyone" to "anyone who can sniff the secret", and an
+    operator reading "Authentication is DISABLED" on a server that does have a token learns to
+    ignore the banner.
+    """
+    stream = io.StringIO()
+    config = ServerConfig(host="0.0.0.0", port=8000, token="a-token-of-sufficient-length")
+    assert config.warn_if_exposed(stream) is True
+    text = stream.getvalue()
+    assert "REACHABLE FROM THE LAN" in text
+    assert "bearer token" in text
+    assert "cleartext" in text
+    assert "Authentication is DISABLED" not in text
+    assert "ssh -L" in text
+
+
+def test_the_warning_says_so_when_the_browser_tier_is_enabled() -> None:
+    stream = io.StringIO()
+    ServerConfig(host="0.0.0.0", browser_enabled=True).warn_if_exposed(stream)
+    text = stream.getvalue()
+    assert "BROWSER ADD-ON IS ENABLED" in text
+    assert "real browser" in text
+
+
+# --- the exposed-browser rule --------------------------------------------------
+
+
+def test_an_exposed_browser_without_a_token_refuses_to_start() -> None:
+    config = ServerConfig(host="0.0.0.0", browser_enabled=True)
+    assert config.browser_needs_auth is True
+    problem = config.browser_policy_error()
+    assert problem is not None
+    assert "browser" in problem and "token" in problem
+
+
+def test_the_browser_rule_is_a_startup_refusal_not_a_runtime_one() -> None:
+    """``--browser-allow-no-auth`` is the only override, and it is the operator's own signature."""
+    overridden = ServerConfig(host="0.0.0.0", browser_enabled=True, browser_allow_no_auth=True)
+    assert overridden.browser_needs_auth is False
+    assert overridden.browser_policy_error() is None
+
+
+def test_a_loopback_browser_needs_no_token() -> None:
+    """The rule is about network reachability, not about the browser being dangerous per se."""
+    config = ServerConfig(host="127.0.0.1", browser_enabled=True)
+    assert config.browser_needs_auth is False
+    assert config.browser_policy_error() is None
+
+
+def test_configuring_both_token_sources_is_refused_rather_than_resolved() -> None:
+    """Silently preferring one secret over the other is how a stale token ends up in production."""
+    from iot_mcp.auth import AuthConfigError
+
+    config = ServerConfig(token="a-token-of-sufficient-length", token_file="/tmp/whatever")
+    with pytest.raises(AuthConfigError):
+        config.auth_settings()
+
+
+def test_a_token_file_is_read_lazily_and_yields_the_authenticator(tmp_path) -> None:
+    secret = tmp_path / "token"
+    secret.write_text("a-token-of-sufficient-length\n", encoding="utf-8")
+    secret.chmod(0o600)
+    auth = ServerConfig(token_file=str(secret)).auth_settings()
+    assert auth is not None
+    assert auth.verify("a-token-of-sufficient-length") is True
+    assert auth.verify("nope-not-it") is False
+
+
+def test_no_auth_wins_over_an_environmental_token_without_losing_the_ambiguity_check() -> None:
+    from iot_mcp.auth import AuthConfigError
+
+    assert ServerConfig(token="a-token", no_auth=True).auth_settings() is None
+    with pytest.raises(AuthConfigError):
+        ServerConfig(token="a-token", token_file="/tmp/whatever", no_auth=True).auth_settings()
 
 
 # --- CLI -----------------------------------------------------------------------
@@ -289,6 +397,82 @@ def test_main_rejects_an_unknown_flag() -> None:
     assert excinfo.value.code != 0
 
 
+# --- CLI: authentication and browser flags -------------------------------------
+
+
+def test_a_token_flag_makes_the_server_authenticated() -> None:
+    config = config_from_args(parse("--token", "a-token-of-sufficient-length"))
+    assert config.authenticated is True
+    assert config.txt_records()["auth"] == "token"
+
+
+def test_no_auth_clears_a_token_that_came_from_the_environment(monkeypatch) -> None:
+    """A flag has to be able to overrule the environment, or the flag is decorative."""
+    monkeypatch.setenv("IOT_MCP_TOKEN", "a-token-of-sufficient-length")
+    assert config_from_args(parse()).authenticated is True
+    declined = config_from_args(parse("--no-auth"))
+    assert declined.authenticated is False
+    assert declined.token is None and declined.no_auth is True
+
+
+def test_the_query_token_opt_in_is_explicit() -> None:
+    assert config_from_args(parse()).allow_query_token is False
+    assert config_from_args(parse("--allow-query-token")).allow_query_token is True
+
+
+def test_browser_flags_reach_the_config() -> None:
+    config = config_from_args(
+        parse(
+            "--browser",
+            "--browser-start",
+            "--browser-allow-no-auth",
+            "--browser-argv",
+            "node srv.js --headless",
+        )
+    )
+    assert config.browser_enabled is True
+    assert config.browser_autostart is True
+    assert config.browser_allow_no_auth is True
+    assert config.browser_argv == ("node", "srv.js", "--headless")
+
+
+def test_browser_defaults_are_off(monkeypatch) -> None:
+    """Every browser flag is additive; nothing here may turn the tier on by default."""
+    for name in ("IOT_MCP_BROWSER", "IOT_MCP_BROWSER_AUTOSTART", "IOT_MCP_BROWSER_ARGV"):
+        monkeypatch.delenv(name, raising=False)
+    config = config_from_args(parse())
+    assert config.browser_enabled is False
+    assert config.browser_autostart is False
+    assert config.browser_argv is None
+
+
+def test_an_unparseable_browser_argv_is_a_usage_error_not_a_crash() -> None:
+    with pytest.raises(ValueError, match="browser-argv"):
+        config_from_args(parse("--browser-argv", "npx 'unbalanced"))
+
+
+def test_main_reports_a_bad_browser_argv_instead_of_tracebacking(capsys) -> None:
+    assert main(["--browser-argv", "npx 'unbalanced"]) == 2
+    assert "browser-argv" in capsys.readouterr().err
+
+
+def test_generate_token_prints_a_secret_without_binding(capsys) -> None:
+    assert main(["--generate-token"]) == 0
+    secret = capsys.readouterr().out.strip()
+    assert 24 <= len(secret) <= 256
+    assert " " not in secret
+
+
+def test_generate_token_with_a_file_writes_it_at_owner_only(capsys, tmp_path) -> None:
+    target = tmp_path / "token"
+    assert main(["--generate-token", "--token-file", str(target)]) == 0
+    assert target.exists()
+    assert target.stat().st_mode & 0o077 == 0
+    out = capsys.readouterr().out
+    assert str(target) in out
+    assert target.read_text(encoding="utf-8").strip()
+
+
 # --- DNS-rebinding protection --------------------------------------------------
 
 
@@ -318,3 +502,104 @@ def test_an_allowlist_beats_the_expose_shortcut() -> None:
     """Passing --allow-host with --expose must narrow, not disable, validation."""
     config = config_from_args(parse("--expose", "--allow-host", "B.local:8000"))
     assert _transport_security(config).enable_dns_rebinding_protection is True
+
+
+# --- interactive consent gate --------------------------------------------------
+
+
+class FakeTTY:
+    """A stand-in for an interactive stdin: isatty() is true, readline() replays lines."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = list(lines)
+
+    def isatty(self) -> bool:
+        return True
+
+    def readline(self) -> str:
+        return self._lines.pop(0) if self._lines else ""
+
+
+def test_the_consent_gate_passes_loopback_through_in_silence() -> None:
+    gate = consent_gate(ServerConfig(host="127.0.0.1"), stdin=FakeTTY(["1"]), stdout=io.StringIO())
+    assert gate is not None and gate.token_file is None
+
+
+def test_the_consent_gate_passes_an_authenticated_bind_through() -> None:
+    config = ServerConfig(host="0.0.0.0", token="x" * 32)
+    assert consent_gate(config, stdin=FakeTTY(["1"]), stdout=io.StringIO()) is config
+
+
+def test_the_consent_gate_stays_silent_when_there_is_no_terminal() -> None:
+    """A headless start (systemd, CI, a pipe) must never block on a question."""
+    config = ServerConfig(host="0.0.0.0")
+    out = io.StringIO()
+    assert consent_gate(config, stdin=io.StringIO(""), stdout=out) is config
+    assert out.getvalue() == ""
+
+
+def test_the_consent_gate_sets_a_token_up_when_the_operator_asks_for_it(
+    monkeypatch, tmp_path
+) -> None:
+    out = io.StringIO()
+    target = tmp_path / "token"
+    monkeypatch.setattr("iot_mcp.cli.default_root", lambda: tmp_path)
+    gate = consent_gate(
+        ServerConfig(host="0.0.0.0"),
+        stdin=FakeTTY(["1"]),
+        stdout=out,
+    )
+    assert gate is not None
+    assert gate.token_file == str(target)
+    assert target.read_text(encoding="utf-8").strip()
+    assert target.stat().st_mode & 0o077 == 0
+    text = out.getvalue()
+    assert "0600" in text
+    assert target.read_text(encoding="utf-8").strip() not in text  # the secret is never echoed
+
+
+def test_the_consent_gate_uses_a_token_file_the_operator_already_has(tmp_path) -> None:
+    existing = tmp_path / "token"
+    existing.write_text("s" * 32 + "\n", encoding="utf-8")
+    gate = consent_gate(
+        ServerConfig(host="0.0.0.0"),
+        stdin=FakeTTY(["2", str(existing)]),
+        stdout=io.StringIO(),
+    )
+    assert gate is not None and gate.token_file == str(existing)
+
+
+def test_the_consent_gate_refuses_a_token_file_that_cannot_be_read(tmp_path) -> None:
+    """A typo'd path must be caught at the prompt, not halfway through booting."""
+    out = io.StringIO()
+    gate = consent_gate(
+        ServerConfig(host="0.0.0.0"),
+        stdin=FakeTTY(["2", str(tmp_path / "nope")]),
+        stdout=out,
+    )
+    assert gate is None
+    assert "cannot read token file" in out.getvalue()
+
+
+def test_the_consent_gate_aborts_on_an_empty_answer() -> None:
+    out = io.StringIO()
+    assert consent_gate(ServerConfig(host="0.0.0.0"), stdin=FakeTTY([""]), stdout=out) is None
+    assert "aborted" in out.getvalue()
+
+
+def test_running_without_auth_requires_typing_the_phrase() -> None:
+    """Enter, a half-answer and a wrong phrase must all refuse; only the phrase proceeds."""
+    for answer in ("", "y", "yes", "no", "no-auth-ish"):
+        out = io.StringIO()
+        config = ServerConfig(host="0.0.0.0")
+        gate = consent_gate(config, stdin=FakeTTY(["3", answer]), stdout=out)
+        assert gate is None, f"{answer!r} must not start an open server"
+    out = io.StringIO()
+    gate = consent_gate(ServerConfig(host="0.0.0.0"), stdin=FakeTTY(["3", "no auth"]), stdout=out)
+    assert gate is not None and not gate.authenticated
+
+
+def test_the_consent_gate_also_covers_no_auth_overriding_an_environmental_token() -> None:
+    """--no-auth on an exposed bind is an explicit override, so it earns the same pause."""
+    config = ServerConfig(host="0.0.0.0", token="x" * 32, no_auth=True)
+    assert consent_gate(config, stdin=FakeTTY(["3", ""]), stdout=io.StringIO()) is None

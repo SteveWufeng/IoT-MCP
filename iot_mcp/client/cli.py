@@ -17,9 +17,11 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from typing import Any
 
+from ..auth import AuthConfigError, read_token_file
 from ..config import DEFAULT_MDNS_TYPE
 from ..discovery import DiscoveryError, browse
 from .connect import call_tool, connect, list_tools, resolve_url
@@ -40,6 +42,19 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--url", default=None, help="Connect to this URL instead of browsing.")
+    parser.add_argument(
+        "--token",
+        default=None,
+        metavar="SECRET",
+        help="Bearer token for a server started with --token. Falls back to $IOT_MCP_TOKEN. "
+        "Prefer --token-file: a flag lands in `ps` and shell history.",
+    )
+    parser.add_argument(
+        "--token-file",
+        default=None,
+        metavar="PATH",
+        help="Read the bearer token from this file. Falls back to $IOT_MCP_TOKEN_FILE.",
+    )
     parser.add_argument(
         "--mdns-type",
         default=DEFAULT_MDNS_TYPE,
@@ -79,12 +94,36 @@ def _dump(payload: Any, *, pretty: bool = True) -> str:
         return str(payload)
 
 
-def _print_endpoints(endpoints: list[Any]) -> None:
+def _resolve_token(args: argparse.Namespace) -> str | None:
+    """Bearer token from flag, file, or environment — in that precedence order.
+
+    ``IOT_MCP_TOKEN`` / ``IOT_MCP_TOKEN_FILE`` are the same variables the server reads, which is
+    deliberate on a single-host setup (one export, both ends work) and a trap on a shared shell:
+    an exported server token also authenticates the client here. An explicit ``--token`` always
+    wins, and there is no flag to *force* an unauthenticated connect — not sending a token is
+    simply not sending one.
+
+    Raises:
+        AuthConfigError: The file is missing, unreadable, empty, or holds a malformed secret.
+    """
+    if getattr(args, "token", None):
+        return str(args.token)
+    if getattr(args, "token_file", None):
+        return read_token_file(args.token_file)
+    env_file = os.environ.get("IOT_MCP_TOKEN_FILE") or ""
+    if env_file:
+        return read_token_file(env_file)
+    env_token = os.environ.get("IOT_MCP_TOKEN") or ""
+    return env_token or None
+
+
+def _print_endpoints(endpoints: list[Any], token: str | None = None) -> None:
     """Render browse results as a small table."""
     if not endpoints:
         print("no MCP servers advertised (browse found nothing)")
         return
     print(f"discovered {len(endpoints)} server(s):")
+    needs_token = False
     for endpoint in endpoints:
         friendly = endpoint.name or endpoint.instance
         print(f"  {friendly}")
@@ -93,6 +132,20 @@ def _print_endpoints(endpoints: list[Any]) -> None:
             print(f"    by name  {endpoint.url_by_name}")
         print(f"    type     {endpoint.service_type}")
         print(f"    version  {endpoint.version or '?'}  transport={endpoint.transport}")
+        properties = getattr(endpoint, "properties", None) or {}
+        auth = str(properties.get("auth", "")).strip()
+        browser = str(properties.get("browser", "")).strip()
+        if auth:
+            print(f"    auth     {auth}")
+            if auth == "token" and not token:
+                needs_token = True
+        if browser:
+            print(f"    browser  {browser}")
+    if needs_token:
+        print(
+            "\n  note: a server above advertises auth=token; pass --token / --token-file "
+            "or set $IOT_MCP_TOKEN or the handshake will be refused with 401."
+        )
 
 
 async def _repl(session: Any, tools: list[dict[str, Any]]) -> None:
@@ -148,6 +201,12 @@ async def _repl(session: Any, tools: list[dict[str, Any]]) -> None:
 
 async def _amain(args: argparse.Namespace) -> int:
     """Run the selected client mode and return an exit code."""
+    try:
+        token = _resolve_token(args)
+    except AuthConfigError as exc:
+        print(f"cannot read the token: {exc}", file=sys.stderr)
+        return 2
+
     if args.browse_only:
         try:
             endpoints = await asyncio.to_thread(browse, args.mdns_type, args.browse_timeout)
@@ -157,7 +216,7 @@ async def _amain(args: argparse.Namespace) -> int:
         if args.json:
             print(_dump([endpoint.to_dict() for endpoint in endpoints], pretty=not args.json))
         else:
-            _print_endpoints(endpoints)
+            _print_endpoints(endpoints, token)
         return 0 if endpoints else 1
 
     try:
@@ -181,10 +240,10 @@ async def _amain(args: argparse.Namespace) -> int:
         return 2
 
     if not args.quiet and not args.json:
-        print(f"connecting to {url}")
+        print(f"connecting to {url}" + (" (authenticated)" if token else ""))
 
     try:
-        async with connect(url) as session:
+        async with connect(url, token=token) as session:
             if args.call:
                 result = await call_tool(session, args.call, arguments, timeout=args.call_timeout)
                 print(_dump(result.payload, pretty=not args.json))
@@ -198,7 +257,16 @@ async def _amain(args: argparse.Namespace) -> int:
             await _repl(session, tools)
             return 0
     except Exception as exc:  # noqa: BLE001 - a dead server is a normal client condition
-        print(f"connection to {url} failed: {_describe_exception(exc)}", file=sys.stderr)
+        detail = _describe_exception(exc)
+        print(f"connection to {url} failed: {detail}", file=sys.stderr)
+        if "401" in detail or "unauthorized" in detail.lower():
+            print(
+                "  hint: this server requires a bearer token. Pass --token / --token-file, or "
+                "unset the server's token. A token that is correct but rejected twice in a row "
+                "is throttled per client for a minute — check for a stale export in your shell.",
+                file=sys.stderr,
+            )
+            return 4
         print(
             "  hint: is the server running and bound --expose? try --url http://<host>:8000/mcp",
             file=sys.stderr,
@@ -214,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         ``0`` success, ``1`` a failed tool call or empty browse, ``2`` bad usage/config,
-        ``3`` connection failure.
+        ``3`` connection failure, ``4`` the server refused the credentials.
     """
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))

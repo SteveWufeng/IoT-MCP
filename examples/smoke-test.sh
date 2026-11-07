@@ -30,6 +30,20 @@ fail() {
   exit 1
 }
 
+TOKEN=""
+if [[ -n "${IOT_MCP_TOKEN_FILE:-}" ]]; then
+  [[ -r "$IOT_MCP_TOKEN_FILE" ]] || fail "token file is not readable: $IOT_MCP_TOKEN_FILE"
+  IFS= read -r TOKEN <"$IOT_MCP_TOKEN_FILE" || true
+  TOKEN="${TOKEN%$'\r'}"
+elif [[ -n "${IOT_MCP_TOKEN:-}" ]]; then
+  TOKEN="$IOT_MCP_TOKEN"
+fi
+
+AUTH_ARGS=()
+if [[ -n "$TOKEN" ]]; then
+  AUTH_ARGS=(-H "Authorization: Bearer $TOKEN")
+fi
+
 # post <json> — one JSON-RPC message to the endpoint. Prints "<headers>\n\n<body>" split into
 # two files so the caller can read both the status line and the SSE payload.
 HEADERS_FILE="$(mktemp)"
@@ -42,6 +56,7 @@ post() {
   curl -sS --max-time "$TIMEOUT" -D "$HEADERS_FILE" -o "$BODY_FILE" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
+    ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
     "$@" \
     -X POST "$URL" --data "$payload"
 }
@@ -58,6 +73,15 @@ payload() {
 }
 
 echo "== target: $URL"
+if [[ -n "$TOKEN" ]]; then
+  if [[ -n "${IOT_MCP_TOKEN_FILE:-}" ]]; then
+    echo "== auth: bearer token from IOT_MCP_TOKEN_FILE (not printed)"
+  else
+    echo "== auth: bearer token from IOT_MCP_TOKEN (not printed)"
+  fi
+else
+  echo "== auth: none configured"
+fi
 
 # 1. initialize ----------------------------------------------------------------
 post '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
@@ -66,6 +90,12 @@ post '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
   fail "could not reach $URL (is 'iot-mcp' running, and is the port right?)"
 
 STATUS=$(awk 'NR==1 {print $2}' "$HEADERS_FILE")
+if [[ "$STATUS" == "401" || "$STATUS" == "429" ]]; then
+  if [[ -n "$TOKEN" ]]; then
+    fail "server rejected the bearer token (HTTP $STATUS). Check the token/server process environment, then restart this client"
+  fi
+  fail "server requires authentication (HTTP $STATUS). Set IOT_MCP_TOKEN_FILE or IOT_MCP_TOKEN and retry"
+fi
 [[ "$STATUS" == "200" ]] || fail "initialize returned HTTP $STATUS: $(head -c 300 "$BODY_FILE")"
 
 INIT=$(payload)

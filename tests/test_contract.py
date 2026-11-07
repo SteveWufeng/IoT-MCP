@@ -13,7 +13,12 @@ from typing import Any
 
 import pytest
 
-from iot_mcp.capabilities import ALL_CAPABILITIES, TOOL_FOR_CAPABILITY, Capability
+from iot_mcp.capabilities import (
+    ALL_CAPABILITIES,
+    BROWSER_CAPABILITIES,
+    TOOL_FOR_CAPABILITY,
+    Capability,
+)
 from iot_mcp.drivers.base import NullDriver, Support, ok
 from iot_mcp.drivers.linux import LinuxDriver
 from iot_mcp.drivers.macos import MacOSDriver
@@ -48,6 +53,17 @@ TOOLS = (
     "focus_window",
 )
 
+#: The five tools the browser tier contributes when ``--browser`` is on. They are lifecycle
+#: controls, not page actions: the page tools come from the upstream add-on at runtime and are
+#: deliberately absent from any fixed list here.
+BROWSER_CONTROL_TOOLS = (
+    "browser_status",
+    "browser_start",
+    "browser_stop",
+    "browser_install_status",
+    "browser_request_install",
+)
+
 
 def bare(name: str) -> Any:
     """A driver for ``name`` that believes nothing is installed on this machine."""
@@ -59,9 +75,29 @@ def bare(name: str) -> Any:
 
 def test_every_capability_names_the_tool_that_exposes_it():
     # list_actions is introspection, not a capability, so it is absent from the map
-    assert set(TOOL_FOR_CAPABILITY.values()) == set(TOOLS) - {"list_actions"}
-    assert set(TOOL_FOR_CAPABILITY) == set(ALL_CAPABILITIES)
-    assert len(set(TOOL_FOR_CAPABILITY.values())) == len(ALL_CAPABILITIES)
+    driver_map = {cap: TOOL_FOR_CAPABILITY[cap] for cap in ALL_CAPABILITIES}
+    assert set(driver_map.values()) == set(TOOLS) - {"list_actions"}
+    assert len(set(driver_map.values())) == len(ALL_CAPABILITIES)
+    browser_map = {cap: TOOL_FOR_CAPABILITY[cap] for cap in BROWSER_CAPABILITIES}
+    assert set(browser_map.values()) == set(BROWSER_CONTROL_TOOLS)
+    assert len(set(browser_map.values())) == len(BROWSER_CAPABILITIES)
+    assert set(TOOL_FOR_CAPABILITY) == set(ALL_CAPABILITIES) | set(BROWSER_CAPABILITIES)
+
+
+def test_browser_capabilities_are_a_separate_vocabulary_from_the_driver_matrix():
+    # The driver matrix is what `list_actions` reports and what every backend must implement.
+    # Browser capabilities are gated behind an operator approval and are not implemented by any
+    # driver, so folding them into ALL_CAPABILITIES would make every backend look deficient.
+    assert set(ALL_CAPABILITIES).isdisjoint(BROWSER_CAPABILITIES)
+    assert [cap.value for cap in BROWSER_CAPABILITIES] == [
+        "browser.status",
+        "browser.start",
+        "browser.stop",
+        "browser.install_status",
+        "browser.request_install",
+    ]
+    assert "browser.request_install" not in {cap.value for cap in ALL_CAPABILITIES}
+    assert set(BROWSER_CONTROL_TOOLS).isdisjoint(TOOLS)
 
 
 def test_capability_names_are_the_dotted_strings_the_server_reports():

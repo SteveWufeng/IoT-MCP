@@ -31,9 +31,13 @@ ruff = ">=0.6"
 default = ["dev"]
 
 [tasks]
-# Run the OS-automation MCP server on "computer B". Defaults to 127.0.0.1:8000, no auth.
-# Add flags after the task name, e.g. `pixi run server --expose`.
+# Run the OS-automation MCP server on "computer B". Defaults to 127.0.0.1:8000 with no token;
+# add flags after the task name, e.g. `pixi run server --expose --token-file ~/.config/iot-mcp/token`.
 server = "python -m iot_mcp"
+# Operator-side approval of optional add-ons (browser). Humans only.
+addons = "python -m iot_mcp.addons_cli"
+# Mint a bearer token: `pixi run token` prints one, `pixi run token --token-file PATH` stores it.
+token = "python -m iot_mcp --generate-token"
 # Browse for advertised servers on the LAN (computer A), no connection attempted.
 discover = "python -m iot_mcp.client --browse-only"
 # Discover + connect + interactive tool prompt.

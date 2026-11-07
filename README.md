@@ -25,25 +25,37 @@ computer A (model + MCP client)          computer B (this server, user session)
 
 ```sh
 pixi install                    # once
-pixi run server --expose        # binds 0.0.0.0:8000, prints a LAN warning
+
+# Recommended for anything remote: generate a bearer token and require it.
+pixi run token -- --token-file ~/.config/iot-mcp/token
+pixi run server --expose --token-file ~/.config/iot-mcp/token
 ```
 
-`--expose` is required for a *remote* client, because the default bind is `127.0.0.1`. Driving only
-your own machine? Leave it off and use an SSH tunnel. The banner reports what was detected:
+Without `--token` or `--token-file`, the server runs with **no authentication**. That is acceptable
+on loopback and not recommended on `--expose`. On a terminal, `--expose` without a token
+therefore **pauses before it binds**: it offers to generate a token for you (or point at one you have), and only starts
+unprotected if you type `no auth`; Enter aborts. Headless starts (systemd, CI, a pipe) cannot answer
+a prompt, so they run with the banner as their only gate — configure a token there yourself.
+DNS-rebinding protection stays on unless `--expose` or `--allow-host` is used. The banner reports
+what was detected:
 
 ```text
 iot-mcp 0.1.0 | linux driver: 10/10 capabilities — apps.list, apps.open, apps.close,
 url.open, media.play_pause, media.next, media.previous, media.status, windows.list, windows.focus
 mDNS: advertising http://192.168.0.54:8000/mcp
 listening: http://0.0.0.0:8000/mcp
+auth: bearer token required
+browser: disabled (default)
 ```
 
 Useful flags: `--port`, `--path`, `--driver`, `--no-mdns`, `--mdns-type`, `--allow-host`,
-`--stateless`. `python -m iot_mcp --help` is authoritative.
+`--stateless`, `--token-file`, `--browser`. `python -m iot_mcp --help` is authoritative.
 
 **On computer A — drive:**
 
 ```sh
+export IOT_MCP_TOKEN_FILE=~/.config/iot-mcp/token       # if B was started with a token
+
 pixi run discover                                        # what is out there?
 pixi run client                                          # discover, connect, prompt
 pixi run client -- --call media_status
@@ -53,8 +65,12 @@ pixi run client -- --call open_app --args '{"name":"firefox"}' --json
 Or skip discovery and name the URL (the path is always `/mcp`):
 
 ```sh
-iot-mcp-client --url http://192.168.0.54:8000/mcp --call list_actions --json
+iot-mcp-client --url http://192.168.0.54:8000/mcp \
+  --token-file ~/.config/iot-mcp/token --call list_actions --json
 ```
+
+Token precedence is `--token`, then `--token-file`, then `$IOT_MCP_TOKEN_FILE`, then
+`$IOT_MCP_TOKEN`. Prefer a file: flags appear in `ps` and shell history.
 
 Exit codes are scripting-friendly: `0` success · `1` nothing discovered, or a tool reported
 `ok: false` · `2` usage/config problem · `130` interrupted. `--json` prints the driver's envelope
@@ -80,9 +96,11 @@ iot-mcp-client --url … --call media_status --json | jq -r '.playing.title // "
 |---|---|---|
 | **Hangs, then times out** | Firewall drops port 8000. mDNS is allowed, TCP is not — so `discover` works and the connect still fails. | On B: `sudo ufw allow 8000/tcp` |
 | **Instant `connection refused`** | Server bound to `127.0.0.1`, or wrong port | Start the server with `--expose` |
+| **Banner prints, then the server exits (status 2)** | Consent gate: `--expose` with no token, and the prompt was never answered | Choose option 1/2 at the prompt, or set a token before starting headlessly |
 | **`421 Misdirected Request`** / "Invalid Host header" | `Host` header validation | Use the name it expects, or `--allow-host <addr>` |
 | **`discover` finds nothing** | mDNS is link-local multicast — VLANs, guest Wi-Fi, AP/client isolation and Docker bridges all stop it, silently | Connect with `--url` |
 | **Discovered URL says `127.0.0.1`** | Server is loopback-bound, so it advertises loopback | `--expose`; a remote client dialling `127.0.0.1` reaches itself |
+| **`401 Unauthorized`** | Server has a bearer token; request/client did not present it | Pass client `--token-file` / `--token`, or set `$IOT_MCP_TOKEN_FILE` / `$IOT_MCP_TOKEN` |
 
 **Five-second check from A, no MCP client needed:**
 
@@ -99,8 +117,8 @@ checklist: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Tools
 
-Eleven tools, one JSON envelope per result. **Call `list_actions` first** — it says what this
-machine can actually do right now, and why the rest cannot.
+The MVP exposes **eleven desktop tools**, one JSON envelope per result. **Call `list_actions`
+first** — it says what this machine can actually do right now, and why the rest cannot.
 
 | Tool | What it does | Side effect |
 |---|---|---|
@@ -117,6 +135,22 @@ machine can actually do right now, and why the rest cannot.
 The four with no side effect are safe to call freely. The last five change what a person is doing —
 `close_app` and `focus_window` carry MCP's `destructiveHint` (and `open_url` `openWorldHint`), so a
 client can require confirmation without parsing prose.
+
+### Optional browser tier
+
+Passing `--browser` registers five lifecycle tools — `browser_status`, `browser_start`,
+`browser_stop`, `browser_install_status`, and `browser_request_install`. Registration is not
+approval: nothing launches until the operator runs the human-only CLI:
+
+```sh
+pixi run addons pending
+pixi run addons install browser
+```
+
+After approval, `browser_start` bridges the upstream `@playwright/mcp` server and dynamically adds
+its page tools (for example `browser_navigate`) to `tools/list`. `browser_stop` removes them again.
+Agents may file a request; they cannot install, approve, launch, download, or run an alternate
+browser command. The approved argv is fingerprinted, and a mismatched `--browser-argv` is refused.
 
 Two traps the annotation does not cover:
 
@@ -142,7 +176,9 @@ tool comes back as data inside that envelope rather than as an MCP protocol erro
 ## Discovery
 
 The server advertises `_appmcp._tcp` with TXT records (`path=/mcp`, `transport=streamable-http`,
-`name`, `version`), so a client builds the full URL without being told it. Three things to know:
+`name`, `version`, `auth`, `browser`), so a client builds the full URL and sees the server's policy
+without being told it. The TXT records never contain the token, fingerprint, or add-on argv. Three
+things to know:
 
 - **mDNS does not route.** Most routers, VLANs, VPNs, Docker bridges and guest Wi-Fi stop it with
   no error at all. When browsing finds nothing, use `--url`.
@@ -158,26 +194,32 @@ server is down"): [docs/discovery.md](docs/discovery.md).
 
 ## Security
 
-**This server has no authentication.** No user, no token, no TLS, no origin check. The
-compensating constraints are that it binds `127.0.0.1` unless you pass `--expose`, keeps DNS-rebinding
-protection on unless you pass `--allow-host`, allowlists `open_url` schemes (`file://` refused),
-never hands a string to a shell (`execvp` with argv lists, deadline on every subprocess), and
-annotates rather than blocks destructive tools.
+Authentication is **off unless you configure it**. Generate a bearer token with
+`pixi run token`, pass `--token-file`, and every HTTP request must send
+`Authorization: Bearer <token>`. There is still no user system or TLS, so a token is not encryption;
+on an untrusted network, tunnel (`ssh -L 8000:127.0.0.1:8000 user@host`) or terminate TLS with an
+authenticating reverse proxy.
 
-For anything beyond a trusted LAN, stay on loopback and tunnel
-(`ssh -L 8000:127.0.0.1:8000 user@host`) or put an authenticating reverse proxy in front. And when a
-demo ends, remove the firewall rule: `sudo ufw delete allow 8000/tcp`.
+The compensating defaults are a loopback bind, bearer authentication when configured, DNS-rebinding
+protection unless `--expose`/`--allow-host`, a `file://`-refusing URL allowlist, no shell
+interpolation, and MCP annotations for destructive tools. A LAN-reachable server with the browser
+tier enabled **refuses to start without a token** unless `--browser-allow-no-auth` is explicitly
+passed. Browser approval is operator-only and argv-pinned.
 
-Full threat statement, including the known local-attacker limitation:
+When a demo ends, remove the firewall rule: `sudo ufw delete allow 8000/tcp`.
+
+Full threat statement, token model, browser policy, and known local-attacker limitation:
 [docs/security.md](docs/security.md).
 
 ## Is it actually tested?
 
 Yes on Linux; **read, not run** on macOS and Windows. Developed and verified on one host
-(CachyOS, Hyprland, Python 3.15). 489 passing + 4 deliberate `xfail` findings, in a suite that
-tripwires any test which tries to start a real process. `focus_window` has never been called
-against a live compositor — a real call moves the operator's focus — and the KWin, GNOME, X11,
-macOS and Windows paths are covered by argv-recording tests and code review, not by execution.
+(CachyOS, Hyprland, Python 3.15). 600 passing + 4 deliberate `xfail` findings, in a suite that
+tripwires any test which tries to start a real process. Auth and browser control/pass-through are
+covered with in-process HTTP and a fake bridge; the real upstream Playwright process is not started
+by default. `focus_window` has never been called against a live compositor — a real call moves the
+operator's focus — and the KWin, GNOME, X11, macOS and Windows paths are covered by argv-recording
+tests and code review, not by execution.
 
 The honest executed-vs-reviewed table, and what the four `xfail`s admit:
 [docs/internals.md](docs/internals.md#what-is-actually-verified).
@@ -185,9 +227,12 @@ The honest executed-vs-reviewed table, and what the four `xfail`s admit:
 ## Layout and development
 
 ```
-iot_mcp/cli.py        server entrypoint        iot_mcp/app.py       the eleven tools (no logic)
-iot_mcp/config.py     defaults + mDNS type     iot_mcp/discovery.py zeroconf advertise/browse
-iot_mcp/drivers/      one module per OS; _proc.py is the ONLY place a subprocess is created
+iot_mcp/cli.py        server entrypoint        iot_mcp/app.py       core tools + optional browser
+iot_mcp/config.py     defaults + policy       iot_mcp/auth.py      bearer token + ASGI middleware
+iot_mcp/addons.py     approval state          iot_mcp/addons_cli.py human-only install CLI
+iot_mcp/browser.py    browser controls        iot_mcp/addon_bridge.py upstream stdio bridge
+iot_mcp/discovery.py  zeroconf advertise/browse
+iot_mcp/drivers/      one module per OS; _proc.py is the ONLY place a driver subprocess is created
 iot_mcp/client/       discovery + connect + tools/call
 tests/  examples/  docs/  skills/
 ```
@@ -197,7 +242,7 @@ Two invariants before you add a tool: **capability detection is lazy and reporte
 import), and **subprocesses exist only in `_proc.py`**.
 
 ```sh
-pixi run test           # 493 tests
+pixi run test           # 600 tests + 4 xfail findings
 pixi run lint
 pixi run format-check
 ```
@@ -207,9 +252,10 @@ backend and the Linux-only lockfile: [docs/internals.md](docs/internals.md).
 
 ## Status
 
-MVP. No authentication, no TLS, no Windows/macOS field verification, one platform's lockfile. What
-is here was chosen because it is verifiable: no shell interpolation, deadlines on every subprocess,
-and a capability answer that admits what it cannot do.
+MVP. Optional bearer auth, no TLS, no Windows/macOS field verification, one platform's lockfile.
+The optional browser tier requires a separate operator approval and its real upstream process is not
+exercised by the default suite. What is here was chosen because it is verifiable: no shell
+interpolation, deadlines on every subprocess, and a capability answer that admits what it cannot do.
 
 ## Docs
 

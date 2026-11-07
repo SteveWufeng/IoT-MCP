@@ -9,13 +9,20 @@ This was developed and verified on **one machine**: CachyOS, Hyprland (Wayland),
 `mcp` 2.3.0, `zeroconf` 0.151.5. That is the honest boundary between "tested" and "written
 carefully".
 
-### Executed here (489 passing + 4 xfail tests, plus live checks)
+### Executed here (600 passing + 4 xfail tests, plus live checks)
 
 - Linux driver end to end against the real session: the real app list (78 `.desktop` entries on
   this machine), real MPRIS `media_status`, 5 real Hyprland windows read through the real
   `hyprctl`, and real launch and real termination of a real process.
 - Server + client over real HTTP on loopback, using the real MCP SDK client — including a forged
   `Host:` header being rejected and `file://` being refused before any spawn.
+- Bearer authentication over in-process uvicorn, with unauthenticated and wrong-token requests
+  rejected before the MCP handshake, valid-token SDK connections succeeding, repeated failures
+  throttled, and the client’s token precedence/header plumbing exercised.
+- Browser control state and the dynamic pass-through contract against a fake bridge: approval and
+  request separation, tool registration/collision skipping, verbatim upstream schema/argument
+  forwarding, error-envelope preservation, and removal of page tools on stop. This does **not**
+  start or exercise the real `@playwright/mcp` child process.
 - Real mDNS advertise → browse → resolve on a LAN interface (resolved to a
   `http://<this host>:<port>/mcp` URL).
 - `focus_window` was **not** exercised against the live compositor: a real call moves the
@@ -43,6 +50,9 @@ The CI here is code review, not a Mac:
   heuristic every other `wmctrl` wrapper uses, and it is why `-x` output is lossy for titles ending
   in a single word. See `iot_mcp/drivers/_linux_wayland.py`.
 - The LangGraph branch of `examples/langgraph_agent.py` (no model credentials on this box).
+- The real browser child process: `npx`, package download, Playwright/Chromium startup, and the
+  upstream server’s actual tool behavior. Its lifecycle and protocol mapping are tested through a
+  fake bridge; the real upstream integration has not been run by this repo’s default suite.
 
 Treat those as plausibly wrong in detail. They follow documented APIs and every failure path
 returns a typed error, but nobody has pressed the button.
@@ -71,11 +81,17 @@ depend on the lockfile at all.
 
 ```
 iot_mcp/
-  cli.py            server entrypoint: args -> ServerConfig -> uvicorn
-  app.py            the eleven MCP tools; thin wrappers, no logic
-  config.py         defaults, and the only definition of the mDNS type
+  cli.py            server entrypoint: args -> ServerConfig -> auth/browser policy -> uvicorn
+  app.py            core tool registration + optional browser controls; thin wrappers, no logic
+  config.py         defaults, auth/browser policy helpers, TXT records, mDNS type
+  auth.py           static bearer token, validation, throttle, ASGI middleware
+  addons.py         approval records and agent-authored install requests
+  addons_cli.py     human-only list/pending/request/install/revoke CLI
+  addon_bridge.py   stdio supervisor and client session for an approved MCP add-on
+  browser.py        browser controls + dynamic upstream pass-through
+  tooling.py        shared tool result/annotation helpers
   discovery.py      zeroconf advertise + browse, both optional
-  capabilities.py   the capability enum and the matrix shape list_actions() returns
+  capabilities.py   driver/browser capability vocabulary
   errors.py         DriverError and its subclasses; the stable error envelope
   drivers/
     base.py         AutomationDriver interface, capability matrix, ok()
@@ -83,29 +99,85 @@ iot_mcp/
     _linux_wayland.py  compositor windows: Hyprland, KWin/GNOME over D-Bus, X11 tools
     macos.py        osascript, open, bundle scanning, AppleScript media dictionaries
     windows.py      PowerShell runner, SendInput media keys, window enum
-    _proc.py        the only place subprocesses are created: argv lists, deadlines, caps
+    _proc.py        the only place driver subprocesses are created: argv lists, deadlines, caps
     _url.py         the shared URL allowlist
     _winutil.py     window matching shared by every platform
     _xdg.py         .desktop parsing and app-name matching
-  client/           discovery + connect + tools/call, and the REPL CLI
-tests/              493 tests, fenced so nothing touches the desktop it runs on
+  client/           discovery + connect + tools/call, token plumbing, and the REPL CLI
+tests/              604 tests (600 passing + 4 findings), fenced so nothing touches the desktop
 examples/           client configs, curl smoke test, LangGraph agent
 skills/             agent-facing skill + a stdlib-only MCP client
 ```
 
-Two invariants worth knowing before you add a tool:
+Four invariants worth knowing before you add a tool:
 
 1. **Capability detection is lazy and reported, never assumed.** A missing `playerctl` shows up in
    `list_actions()` as `dependency_missing` with the package name in the hint. Nothing crashes at
    import time because a CLI is absent.
-2. **Subprocesses exist only in `_proc.py`.** `run()` gives you `Completed` with capped capture and
-   a deadline; `spawn_detached`/`spawn_monitored` start GUI apps that outlive the server and never
-   become zombies. If you find yourself typing `create_subprocess_exec` elsewhere, stop.
+2. **Driver subprocesses exist only in `_proc.py`.** `run()` gives you `Completed` with capped
+   capture and a deadline; `spawn_detached`/`spawn_monitored` start GUI apps that outlive the server
+   and never become zombies. The one non-driver process owner is `addon_bridge.py`, which exists to
+   supervise a separately approved stdio MCP add-on.
+3. **Authentication wraps the complete ASGI application.** The CLI resolves token settings and the
+   exposed-browser policy before opening the driver/socket, then wraps `streamable_http_app()` rather
+   than only the MCP route. That way a future health/root route cannot become an unauthenticated
+   exception.
+4. **Approval is filesystem policy, while registration is merely enablement.** `--browser` registers
+   control tools only. `iot-mcp-addons install browser` writes the approval record pinning exact
+   argv; `browser_start` may create a bridge when that record exists, and `browser_stop` tears the
+   bridge down and unregisters its dynamic tools.
+
+### Auth request path
+
+```
+HTTP/WS scope
+  -> bearer_auth_middleware
+       -> per-source sliding-window throttle
+       -> extract_token from Authorization, X-Api-Key, X-IoT-MCP-Token, optional query
+       -> constant-time verify
+  -> MCP Streamable HTTP app
+```
+
+The middleware intentionally understands the ASGI scope directly rather than adding a web framework.
+Query strings are refused by default and produce a distinct hint. Failure responses are JSON
+`401`/`429` objects so an agent can recover rather than retry an opaque protocol failure forever.
+
+### Add-on state and browser pass-through
+
+`AddonManager` stores policy as JSON below `$XDG_CONFIG_HOME/iot-mcp` or `~/.config/iot-mcp`,
+overridable with `IOT_MCP_ADDON_ROOT`:
+
+```
+requests/<name>-<timestamp>-<pid>-<uuid>.json   agent-authored, untrusted
+entries/<name>.json                              human-approved, trusted policy
+```
+
+`fingerprint_argv()` hashes a length-prefixed canonicalization of argv, so shell-like string
+concatenation cannot forge a boundary collision. `AddonEntry.matches()` compares the exact approved
+fingerprint at launch.
+
+`AddonBridge` owns one stdio MCP client session. Its supervisor task owns lifecycle so start/stop do
+not depend on the ASGI request that happened to trigger them. Page tool names are normally mapped
+into the `browser_` namespace; names already using that prefix pass through unchanged.
+
+Pass-through deliberately uses a small amount of SDK private surface:
+
+- The upstream `Tool` is inserted into `MCPServer._tool_manager._tools`.
+- `_PassThroughTool` overrides `run()` to bypass signature-derived validation because the handler has
+  no static schema it could validate against.
+- Removal uses `MCPServer.remove_tool()`.
+- The published `inputSchema` and description are upstream’s, not a locally maintained mirror.
+- `_preparse()` decodes JSON text into objects/arrays only when upstream schema declares those
+  types, preserving strings and unparseable values.
+- Collisions with the five control tools or existing registered names are skipped, never shadowed.
+
+`mcp>=2.3,<3` is pinned because these are internal touchpoints. If they move, registration fails
+loudly instead of silently exposing a broken tool set.
 
 ## Development
 
 ```sh
-pixi run test           # 493 tests
+pixi run test           # 600 tests + 4 xfail findings
 pixi run lint
 pixi run format-check
 ```
@@ -134,7 +206,14 @@ Two environment notes, because both look like accidents and neither is:
 ## Decisions worth knowing
 
 - **`mcp` 2.x, not 1.x.** conda-forge resolves 2.3.0, and 2.x renamed `FastMCP` to `MCPServer` in
-  `mcp.server.mcpserver`. Nothing else about the API used here moved.
+  `mcp.server.mcpserver`. The upper pin is also protection for the browser pass-through’s narrow
+  private-registry touchpoint.
+- **Authentication is one static bearer token, not a user system.** The endpoint controls one
+  desktop, so the minimum meaningful boundary is shared-secret authorization. Adding accounts/RBAC
+  without TLS and session management would add more state than risk reduction.
+- **Browser capabilities are not driver capabilities.** Driver capability answers describe the OS
+  integration; browser tools are an operator-approved add-on with separate lifecycle, approval state,
+  and risk surface.
 - **A Hyprland backend exists** beyond the original brief, because this is a Hyprland machine and a
   window tool that cannot be run cannot be verified. KWin and GNOME are detected over D-Bus and
   report what to enable; neither is driven.
@@ -150,7 +229,8 @@ Two environment notes, because both look like accidents and neither is:
 
 ## Status
 
-MVP. No authentication, no TLS, no Windows/macOS field verification, one platform's lockfile, and
-a media layer that depends on `playerctl` (Linux), AppleScript dictionaries (macOS) and `SendInput`
-(Windows). What is here was chosen because it is verifiable: no shell interpolation, deadlines on
-every subprocess, and a capability answer that admits what it cannot do.
+MVP. Optional static bearer authentication, no TLS, no Windows/macOS field verification, one
+platform’s lockfile, an optional browser add-on whose real child process is unexercised by default,
+and a media layer that depends on `playerctl` (Linux), AppleScript dictionaries (macOS) and
+`SendInput` (Windows). What is here was chosen because it is verifiable: no shell interpolation,
+deadlines on subprocesses, and a capability answer that admits what it cannot do.

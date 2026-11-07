@@ -42,8 +42,79 @@ To check from A in five seconds without any MCP client:
 curl -sv --max-time 5 http://192.168.0.54:8000/mcp -o /dev/null
 ```
 
-A timeout with **no HTTP status at all** is this section. Any status — even `400 Bad Request` or
-`421 Misdirected Request` — means the packets arrived and the firewall is not your problem.
+A timeout with **no HTTP status at all** is this section. Any status — even `400 Bad Request`,
+`401 Unauthorized`, `421 Misdirected Request`, or `429 Too Many Requests` — means the packets
+arrived and the firewall is not your problem.
+
+## The server prints the LAN banner and then exits instead of serving
+
+If you started `--expose` from a terminal with no token configured, the server stops before it
+binds anything and asks how to proceed. Pressing Enter (or answering anything it does not recognise, or
+running out of input) is an explicit abort, and the process exits with status `2` without binding.
+That is the consent gate doing its job: pick option 1 to have it write a token, option 2 to point at
+a token file you already have, or type `no auth` if you truly mean an open LAN endpoint.
+
+A server under systemd or a CI job is not a terminal, so it never sees this prompt — it starts with
+the banner alone. If a service unit is restart-looping, check that `IOT_MCP_TOKEN_FILE` (or
+`--token-file`) is set in the unit rather than assuming the prompt swallowed it.
+
+## The server is reachable but says `401` or `429`
+
+`401` means authentication is configured and the request did not present the configured bearer token;
+`429` means too many failed attempts came from that source and the endpoint is cooling down. Neither
+is a discovery or routing failure.
+
+From the CLI, prefer a token file:
+
+```sh
+export IOT_MCP_TOKEN_FILE=~/.config/iot-mcp/token
+iot-mcp-client --url http://192.168.0.54:8000/mcp --call media_status
+```
+
+With curl, send the header explicitly:
+
+```sh
+curl -fsS --max-time 5 \
+  -H "Authorization: Bearer $(cat "$IOT_MCP_TOKEN_FILE")" \
+  http://192.168.0.54:8000/mcp
+```
+
+Check the server banner: it should say `auth: bearer token required`. The client does not need to be
+started with a token in advance — it may discover that `auth=token` from TXT records and then warn if
+no client token is configured.
+
+Common causes:
+
+- Token in `$IOT_MCP_TOKEN` on B but not A. Server and client use separate environment variables and
+  separate processes.
+- Client started before exporting `IOT_MCP_TOKEN_FILE`; restart the client.
+- Client is pointing at the wrong token file. Check `ls -l ~/.config/iot-mcp/token` and restart the
+  client in the foreground so the resolved path and any read error are visible.
+- Client sends the token via a proxy that strips `Authorization`; use a direct connection or tunnel.
+- Repeated wrong-token attempts produced `429`; wait for `Retry-After`, fix the token, then retry.
+- Query-string token was rejected. Use a header, or deliberately start the server with
+  `--allow-query-token` only when no header can be set.
+
+## The browser tier refuses to start or missing page tools
+
+`--browser` only registers lifecycle controls. If `tools/list` lacks `browser_navigate`, that is not
+necessarily a failure — call `browser_status` and read `approved`, `running`, `state`, `refusal`, and
+`tools`.
+
+A server bind that is LAN-reachable with browser enabled and no token is refused at startup. Use a
+token, bind to loopback, or explicitly pass `--browser-allow-no-auth` only for a network you already
+trust. The escape hatch should not be used to bypass a missing token.
+
+If status says not approved, have the operator run:
+
+```sh
+pixi run addons pending
+pixi run addons install browser
+```
+
+Then `browser_start` may launch the approved argv. If the operator changes `--browser-argv`, the
+fingerprint will differ and the server will refuse to launch it; approve the intended command instead
+of repointing the running approval to something else.
 
 ## Opening the port (operator runs these on B)
 
@@ -52,8 +123,8 @@ sudo ufw allow 8000/tcp comment 'MCP demo (temporary)'
 sudo ufw status verbose | grep 8000
 ```
 
-And when the demo is over — the server has no authentication, so leaving this open is leaving
-the desktop open to the LAN:
+And when the demo is over — leaving an unauthenticated server open is leaving the desktop open to
+the LAN:
 
 ```sh
 sudo ufw delete allow 8000/tcp

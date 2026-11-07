@@ -18,3 +18,8 @@ dist/
 
 # AgentFS session databases (never part of the project)
 .agentfs/
+session-*.md
+
+# Generated bearer tokens. A token in the repo is a leaked token, and `--generate-token`
+# without --token-file drops one in the current directory if you are not paying attention.
+/token

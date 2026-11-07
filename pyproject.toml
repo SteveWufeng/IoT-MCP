@@ -37,6 +37,7 @@ test = ["pytest>=8", "pytest-asyncio>=0.24"]
 
 [project.scripts]
 iot-mcp = "iot_mcp.cli:main"
+iot-mcp-addons = "iot_mcp.addons_cli:main"
 iot-mcp-client = "iot_mcp.client.cli:main"
 
 [project.urls]

@@ -16,6 +16,9 @@
   // Replace the URL with what `iot-mcp-client discover` prints on that machine. The path is
   // always /mcp. If you changed the server's --mdns-type, that has no effect here: this is a
   // direct URL, discovery is not involved.
+  //
+  // Start opencode where IOT_MCP_TOKEN is present. If the server wrote a token file:
+  //   export IOT_MCP_TOKEN="$(cat ~/.config/iot-mcp/token)"
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
@@ -28,12 +31,12 @@
         // on *this* machine, which defeats the point of driving a different computer.
         "type": "remote",
         "url": "http://192.168.0.54:8000/mcp",
-        // Remote servers try OAuth unless told otherwise. This MVP has no authentication at all
-        // — no token, no API key — so authorisation discovery has nothing to find and the
-        // server would just sit at "needs authentication". Note this is a slightly different
-        // case from the docs' example, which disables OAuth for a server protected by a header
-        // credential; here there is no credential of any kind.
-        "oauth": false
+        // IoT-MCP uses one shared bearer token, not OAuth. Disable automatic OAuth discovery and
+        // send the server's Authorization header directly. `{env:...}` is expanded by opencode.
+        "oauth": false,
+        "headers": {
+          "Authorization": "Bearer {env:IOT_MCP_TOKEN}"
+        }
         // No `enabled` field: V2 connects configured servers automatically. To keep this entry
         // in place but disconnected, set `"disabled": true`.
         //
@@ -45,11 +48,11 @@
         // make the demo more fragile, not less. Raise `startup` here (e.g. 45000) if B is on a
         // sleepy Wi-Fi link and the first connect races.
         //
-        // `codemode` defaults to true, so these eleven tools are reached through Code Mode,
-        // grouped under the normalised server name: tools.iot.open_app(...), tools.iot
-        // .media_status(...) and so on. Set "codemode": false to put them on the provider's
-        // native tool list instead — worth doing if you want the model to see the destructive
-        // flags without Code Mode in between.
+        // `codemode` defaults to true, so the core tools are reached through Code Mode, grouped
+        // under the normalised server name: tools.iot.open_app(...), tools.iot.media_status(...)
+        // and so on. An operator-enabled browser add-on adds its own browser_* tools. Set
+        // "codemode": false to put them on the provider's native tool list instead — worth doing
+        // if you want the model to see the destructive flags without Code Mode in between.
         //
         // Leave `protocol` alone. The default ("legacy") performs the classic initialize
         // handshake, which is what the MCP Python SDK server speaks.

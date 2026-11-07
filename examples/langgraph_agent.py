@@ -9,6 +9,11 @@ tool would drift the first time the server's schema changes; this cannot.
     export IOT_MCP_MODEL=openai:gpt-5-mini          # any langchain chat model spec
     python examples/langgraph_agent.py "pause my music and focus the firefox window"
 
+If the server was started with a bearer token, set one of:
+
+    export IOT_MCP_TOKEN_FILE=~/.config/iot-mcp/token  # preferred
+    export IOT_MCP_TOKEN=<token>                       # visible in the process environment
+
 Two ways to get the tools, tried in this order:
 
 1. ``langchain[mcp]`` — the maintained home for this integration.
@@ -31,7 +36,25 @@ import os
 import sys
 from typing import Any
 
+from iot_mcp.auth import read_token_file
 from iot_mcp.client import connect, list_tools
+
+
+def bearer_token() -> str | None:
+    """Read the server's shared secret from the environment, using the same precedence as the CLI."""
+    token_file = os.environ.get("IOT_MCP_TOKEN_FILE", "").strip()
+    if token_file:
+        return read_token_file(token_file).strip() or None
+    return os.environ.get("IOT_MCP_TOKEN", "").strip() or None
+
+
+def server_connection(url: str) -> dict[str, Any]:
+    """Build a Streamable HTTP connection config, adding a bearer header when one is configured."""
+    connection: dict[str, Any] = {"transport": "http", "url": url}
+    token = bearer_token()
+    if token:
+        connection["headers"] = {"Authorization": f"Bearer {token}"}
+    return connection
 
 
 async def server_tools(url: str) -> list[Any]:
@@ -54,7 +77,7 @@ async def server_tools(url: str) -> list[Any]:
         except ImportError:
             return []
 
-    client = MultiServerMCPClient({"iot-os": {"transport": "http", "url": url}})
+    client = MultiServerMCPClient({"iot-os": server_connection(url)})
     # get_tools() connects, reads tools/list, and wraps each entry as a StructuredTool that
     # performs a tools/call when invoked. A fresh connection per call is the default; that is
     # fine for an agent and avoids holding a session open across model turns.
@@ -91,7 +114,7 @@ async def print_tools_without_langchain(url: str) -> int:
     """
     print("No LangChain MCP integration importable — listing the server instead.\n")
     try:
-        async with connect(url) as session:
+        async with connect(url, token=bearer_token()) as session:
             for tool in await list_tools(session):
                 annotations = tool.get("annotations") or {}
                 hint = " (read-only)" if annotations.get("read_only_hint") else ""

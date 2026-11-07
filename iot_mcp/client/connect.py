@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -29,10 +30,16 @@ try:  # mcp >= 2.0
 except ImportError:  # pragma: no cover - only taken on mcp 1.x installs
     from mcp.client.streamable_http import streamablehttp_client as _http_client
 
+try:  # present in both lines; lets us set headers on the transport's own HTTP client
+    from mcp.shared._httpx_utils import create_mcp_http_client as _create_http_client
+except ImportError:  # pragma: no cover - defensive against SDK reshuffles
+    _create_http_client = None
+
 log = logging.getLogger("iot_mcp.client")
 
 __all__ = [
     "CallResult",
+    "auth_headers",
     "call_tool",
     "connect",
     "describe_exception",
@@ -213,25 +220,79 @@ async def list_tools(session: ClientSession) -> list[dict[str, Any]]:
     return tools
 
 
+def auth_headers(
+    token: str | None = None, *, headers: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Merge an explicit bearer token into a header mapping.
+
+    Args:
+        token: The shared secret, or ``None`` for an unauthenticated client.
+        headers: Additional headers; an ``Authorization`` key here wins over ``token``, so a
+            caller can present the secret however its environment expects.
+
+    Returns:
+        A new dict (never the caller's), possibly empty.
+    """
+    merged = dict(headers or {})
+    if token and not any(key.lower() == "authorization" for key in merged):
+        merged["Authorization"] = f"Bearer {token}"
+    return merged
+
+
 @contextlib.asynccontextmanager
-async def connect(url: str) -> AsyncIterator[ClientSession]:
+async def connect(
+    url: str,
+    *,
+    token: str | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> AsyncIterator[ClientSession]:
     """Open a Streamable HTTP MCP session against ``url``.
 
     Args:
         url: Absolute endpoint, e.g. ``http://192.168.1.20:8000/mcp``. Use
             :func:`resolve_url` to obtain one from mDNS.
+        token: Bearer secret for a server started with ``--token``/``--token-file``. Sent as a
+            header, never in the query string: the query form is only accepted by servers whose
+            operator passed ``--allow-query-token``, precisely because URLs get logged.
+        headers: Extra HTTP headers, merged with (and overriding) the token header.
 
     Yields:
         An initialized session, closed on exit.
 
     Raises:
         Exception: Connection or handshake failures propagate — callers that want a REPL should
-            catch them and re-resolve.
+            catch them and re-resolve. A 401 arrives as an exception whose text contains
+            ``401``; :func:`describe_exception` unwraps it out of the transport's task group.
     """
-    async with _http_client(url) as streams:
-        read, write = streams[0], streams[1]
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    merged = auth_headers(token, headers=headers)
+    kwargs: dict[str, Any] = {}
+    client: Any = None
+    if merged:
+        if (
+            _create_http_client is not None
+            and "http_client" in inspect.signature(_http_client).parameters
+        ):
+            # mcp 2.x moved header/auth configuration onto the injected HTTP client.
+            client = _create_http_client(headers=merged)
+            kwargs["http_client"] = client
+        else:  # pragma: no cover - mcp 1.x shape
+            kwargs["headers"] = merged
+
+    async def _open() -> AsyncIterator[ClientSession]:
+        async with _http_client(url, **kwargs) as streams:
+            read, write = streams[0], streams[1]
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
+
+    if client is not None:
+        # The SDK only manages the lifecycle of a client it created itself, so closing ours is
+        # this function's job — otherwise every connect leaks a connection pool.
+        async with client:
+            async for session in _open():
+                yield session
+    else:
+        async for session in _open():
             yield session
 
 

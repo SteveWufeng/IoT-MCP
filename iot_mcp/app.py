@@ -2,7 +2,9 @@
 
 Kept deliberately thin. There is no capability logic in here — a tool either returns the
 driver's result dict or the driver's error envelope, so all behaviour lives in the driver and
-can be tested without a transport.
+can be tested without a transport. The envelope/annotation helpers the tool bodies share live
+in :mod:`iot_mcp.tooling`; the optional browser tier is registered from
+:mod:`iot_mcp.browser`, which is inert unless the operator passed ``--browser``.
 
 Tool docstrings are part of the public interface: they are sent to the model verbatim as the
 tool description, so they state preconditions and failure modes rather than implementation
@@ -11,16 +13,16 @@ notes.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.types import ToolAnnotations
 
 from . import __version__
+from .browser import BROWSER_INSTRUCTIONS, BrowserControls, register_browser_tools
 from .drivers import get_driver
 from .drivers.base import AutomationDriver
-from .errors import DriverError
+from .tooling import annotations_for as _annotations
+from .tooling import invoke as _invoke
 
 __all__ = ["SERVER_INSTRUCTIONS", "build_server", "register_tools"]
 
@@ -40,58 +42,6 @@ will not start working on retry.
 App arguments are matched fuzzily against installed application names and ids; if a name
 returns not_found, the error includes a candidate list to pick from. Prefer exact ids from
 list_apps() over guessing."""
-
-
-async def _invoke(action: Callable[[], Any]) -> dict[str, Any]:
-    """Run one driver call and normalise the outcome to the tool result envelope.
-
-    Args:
-        action: Zero-argument callable returning either a result dict or an awaitable of
-            one, so the async capability methods and the synchronous capability matrix
-            share a single error-handling path.
-
-    Returns:
-        The driver's result dict, or :meth:`iot_mcp.errors.DriverError.to_dict` for any
-        typed driver failure. Unexpected exceptions are converted too, because an
-        unhandled traceback in a tool response is useless to an agent.
-    """
-    try:
-        outcome = action()
-        return await outcome if hasattr(outcome, "__await__") else outcome
-    except DriverError as exc:
-        return exc.to_dict()
-    except Exception as exc:  # pragma: no cover - driver bug, reported not raised
-        return {
-            "ok": False,
-            "error": {
-                "type": "internal_error",
-                "message": f"{type(exc).__name__}: {exc}",
-                "hint": "The server raised an unexpected error; report it or try a different "
-                "capability from list_actions().",
-            },
-        }
-
-
-def _annotations(
-    title: str, *, read_only: bool, destructive: bool = False, open_world: bool = False
-) -> ToolAnnotations:
-    """Build tool annotations, so a client can gate dangerous calls without parsing text.
-
-    Args:
-        title: Human-facing label.
-        read_only: Whether the tool only observes.
-        destructive: Whether it can disrupt user work (closing apps, stealing focus).
-        open_world: Whether the call reaches outside the machine. ``open_url`` is the only
-            one: it hands a URL to the browser, which then fetches it. Marking it honestly
-            lets a client require confirmation without reading the description.
-    """
-    return ToolAnnotations(
-        title=title,
-        readOnlyHint=read_only,
-        destructiveHint=destructive,
-        idempotentHint=read_only,
-        openWorldHint=open_world,
-    )
 
 
 def register_tools(server: MCPServer, driver: AutomationDriver) -> None:
@@ -405,6 +355,7 @@ def build_server(
     driver: AutomationDriver | None = None,
     *,
     name: str = "iot-mcp",
+    browser: BrowserControls | None = None,
 ) -> MCPServer:
     """Construct the MCP server with the OS-automation tools attached.
 
@@ -412,18 +363,26 @@ def build_server(
         driver: Backend to delegate to. ``None`` selects one by platform, which is what the
             CLI relies on.
         name: Server name reported in the MCP initialize handshake.
+        browser: Optional approved add-on tier (see :mod:`iot_mcp.browser`). ``None`` — the
+            default — means the browser tools do not exist on this server at all, which is
+            what keeps the MVP tool surface unchanged for anyone who did not opt in.
 
     Returns:
         A configured :class:`MCPServer`; call ``streamable_http_app()`` on it (see
         :mod:`iot_mcp.cli`) or ``run()`` for stdio.
     """
     active = driver if driver is not None else get_driver()
+    instructions = SERVER_INSTRUCTIONS
+    if browser is not None:
+        instructions = f"{SERVER_INSTRUCTIONS}\n\n{BROWSER_INSTRUCTIONS}"
     server = MCPServer(
         name,
         title="IoT OS Automation",
         description="Control applications, media, URLs and windows on this machine.",
-        instructions=SERVER_INSTRUCTIONS,
+        instructions=instructions,
         version=__version__,
     )
     register_tools(server, active)
+    if browser is not None:
+        register_browser_tools(server, browser)
     return server
